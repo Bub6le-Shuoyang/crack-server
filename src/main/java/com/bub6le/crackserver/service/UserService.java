@@ -1,0 +1,11 @@
+package com.bub6le.crackserver.service;
+
+import java.util.Map;
+
+public interface UserService {
+    Map<String, Object> login(String email, String password);
+    Map<String, Object> sendVerificationCode(String email);
+    Map<String, Object> register(String email, String password, String name, String code);
+    Map<String, Object> forgotPassword(String email, String code, String newPassword);
+    Map<String, Object> logout(String token);
+}
