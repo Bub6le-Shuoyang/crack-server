@@ -13,6 +13,7 @@ import com.bub6le.crackserver.mapper.UserTokenMapper;
 import com.bub6le.crackserver.mapper.VerificationCodeMapper;
 import com.bub6le.crackserver.service.EmailService;
 import com.bub6le.crackserver.service.UserService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @Service
+@Slf4j
 public class UserServiceImpl implements UserService {
 
     @Autowired
@@ -38,8 +40,10 @@ public class UserServiceImpl implements UserService {
     @Override
     public Map<String, Object> login(String email, String password) {
         Map<String, Object> result = new HashMap<>();
+        log.info("登录开始 email={}", email);
         User user = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getEmail, email));
         if (user == null) {
+            log.warn("登录失败，用户不存在 email={}", email);
             result.put("error", true);
             result.put("message", "用户不存在");
             result.put("code", "USER_NOT_FOUND");
@@ -47,13 +51,14 @@ public class UserServiceImpl implements UserService {
         }
 
         if (!BCrypt.checkpw(password, user.getPassword())) {
+            log.warn("登录失败，密码错误 email={}", email);
             result.put("error", true);
             result.put("message", "密码错误");
             result.put("code", "INVALID_PASSWORD");
             return result;
         }
 
-        // Generate Token
+        log.debug("生成登录令牌 email={}", email);
         String tokenStr = UUID.randomUUID().toString().replace("-", "");
         UserToken userToken = new UserToken();
         userToken.setToken(tokenStr);
@@ -64,7 +69,7 @@ public class UserServiceImpl implements UserService {
         userToken.setUpdatedAt(LocalDateTime.now());
         userTokenMapper.insert(userToken);
 
-        // Update last login time
+        log.debug("更新最后登录时间 email={}", email);
         user.setLastLoginAt(LocalDateTime.now());
         userMapper.updateById(user);
 
@@ -75,14 +80,16 @@ public class UserServiceImpl implements UserService {
         userInfo.put("role_id", user.getRoleId());
         result.put("user", userInfo);
 
+        log.info("登录成功 email={}", email);
         return result;
     }
 
     @Override
     public Map<String, Object> sendVerificationCode(String email) {
         Map<String, Object> result = new HashMap<>();
-        // Check if email format is valid (basic check)
+        log.info("发送验证码开始 email={}", email);
         if (email == null || !email.contains("@")) {
+            log.warn("发送验证码失败，邮箱格式错误 email={}", email);
             result.put("error", true);
             result.put("message", "邮箱不存在或邮箱不可用");
             result.put("code", "INVALID_EMAIL_FORMAT");
@@ -90,11 +97,12 @@ public class UserServiceImpl implements UserService {
         }
 
         try {
-            // Determine type: 1=register (user not exists), 2=reset (user exists)
+            log.debug("检查邮箱是否已注册 email={}", email);
             User user = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getEmail, email));
             int type = (user == null) ? 1 : 2;
 
             String code = RandomUtil.randomNumbers(6);
+            log.debug("生成验证码 email={}", email);
             VerificationCode vc = new VerificationCode();
             vc.setEmail(email);
             vc.setCode(code);
@@ -104,15 +112,17 @@ public class UserServiceImpl implements UserService {
             vc.setCreatedAt(LocalDateTime.now());
             verificationCodeMapper.insert(vc);
 
+            log.debug("发送邮件 email={}", email);
             emailService.sendVerificationCode(email, code);
 
             result.put("ok", true);
             result.put("message", "验证码已发送");
+            log.info("发送验证码成功 email={}", email);
         } catch (Exception e) {
+            log.error("发送验证码异常 email={}", email, e);
             result.put("error", true);
             result.put("message", "邮件发送服务暂时不可用，请稍后再试");
             result.put("code", "EMAIL_SERVICE_UNAVAILABLE");
-            e.printStackTrace();
         }
         return result;
     }
@@ -120,49 +130,50 @@ public class UserServiceImpl implements UserService {
     @Override
     public Map<String, Object> register(String email, String password, String name, String code) {
         Map<String, Object> result = new HashMap<>();
-
-        // Check if email exists
+        log.info("注册开始 email={}", email);
         User existingUser = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getEmail, email));
         if (existingUser != null) {
+            log.warn("注册失败，邮箱已存在 email={}", email);
             result.put("error", true);
             result.put("message", "该邮箱已被注册");
             result.put("code", "EMAIL_ALREADY_EXISTS");
             return result;
         }
 
-        // Validate code
+        log.debug("校验验证码 email={}", email);
         VerificationCode vc = verificationCodeMapper.selectOne(new LambdaQueryWrapper<VerificationCode>()
                 .eq(VerificationCode::getEmail, email)
                 .eq(VerificationCode::getCode, code)
                 .eq(VerificationCode::getIsUsed, 0)
-                .orderByDesc(VerificationCode::getId) // Get latest
+                .orderByDesc(VerificationCode::getId)
                 .last("LIMIT 1"));
 
         if (vc == null || vc.getExpiredAt().isBefore(LocalDateTime.now())) {
+            log.warn("注册失败，验证码错误或过期 email={}", email);
             result.put("error", true);
             result.put("message", "验证码错误或已过期");
             result.put("code", "INVALID_VERIFICATION_CODE");
             return result;
         }
 
-        // Password validation (optional as per requirement)
         if (password.length() < 6) {
+             log.warn("注册失败，密码格式不合法 email={}", email);
              result.put("error", true);
              result.put("message", "密码长度需不少于6位");
              result.put("code", "INVALID_PASSWORD_FORMAT");
              return result;
         }
 
-        // Mark code as used
+        log.debug("标记验证码已使用 email={}", email);
         vc.setIsUsed(1);
         verificationCodeMapper.updateById(vc);
 
-        // Create User
+        log.debug("创建用户 email={}", email);
         User user = new User();
         user.setEmail(email);
         user.setPassword(BCrypt.hashpw(password));
         user.setName(name);
-        user.setRoleId("1"); // Default role
+        user.setRoleId("1");
         user.setStatus(1);
         user.setCreatedAt(LocalDateTime.now());
         user.setUpdatedAt(LocalDateTime.now());
@@ -176,14 +187,14 @@ public class UserServiceImpl implements UserService {
         userInfo.put("roleid", user.getRoleId());
         result.put("user", userInfo);
 
+        log.info("注册成功 email={}", email);
         return result;
     }
 
     @Override
     public Map<String, Object> forgotPassword(String email, String code, String newPassword) {
         Map<String, Object> result = new HashMap<>();
-
-        // Validate code
+        log.info("找回密码开始 email={}", email);
         VerificationCode vc = verificationCodeMapper.selectOne(new LambdaQueryWrapper<VerificationCode>()
                 .eq(VerificationCode::getEmail, email)
                 .eq(VerificationCode::getCode, code)
@@ -192,6 +203,7 @@ public class UserServiceImpl implements UserService {
                 .last("LIMIT 1"));
 
         if (vc == null || vc.getExpiredAt().isBefore(LocalDateTime.now())) {
+            log.warn("找回密码失败，验证码错误或过期 email={}", email);
             result.put("error", true);
             result.put("message", "验证信息错误，修改密码失败");
             result.put("code", "INVALID_VERIFICATION_CODE");
@@ -200,38 +212,43 @@ public class UserServiceImpl implements UserService {
 
         User user = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getEmail, email));
         if (user == null) {
+            log.warn("找回密码失败，用户不存在 email={}", email);
             result.put("error", true);
-            result.put("message", "用户不存在"); // Should not happen if logic is correct, but for safety
+            result.put("message", "用户不存在");
             result.put("code", "USER_NOT_FOUND");
             return result;
         }
 
-        // Mark code as used
+        log.debug("标记验证码已使用 email={}", email);
         vc.setIsUsed(1);
         verificationCodeMapper.updateById(vc);
 
-        // Update password
+        log.debug("更新用户密码 email={}", email);
         user.setPassword(BCrypt.hashpw(newPassword));
         user.setUpdatedAt(LocalDateTime.now());
         userMapper.updateById(user);
 
         result.put("ok", true);
         result.put("message", "密码重置成功");
+        log.info("找回密码成功 email={}", email);
         return result;
     }
 
     @Override
     public Map<String, Object> logout(String token) {
         Map<String, Object> result = new HashMap<>();
+        log.info("登出开始");
         if (token != null) {
             UserToken userToken = userTokenMapper.selectOne(new LambdaQueryWrapper<UserToken>().eq(UserToken::getToken, token));
             if (userToken != null) {
+                log.debug("标记令牌失效");
                 userToken.setIsValid(0);
                 userToken.setUpdatedAt(LocalDateTime.now());
                 userTokenMapper.updateById(userToken);
             }
         }
         result.put("ok", true);
+        log.info("登出成功");
         return result;
     }
 }
