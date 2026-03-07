@@ -69,3 +69,42 @@ CREATE TABLE IF NOT EXISTS `userTokens` (
     KEY `idx_isValid` (`isValid`) COMMENT '有效性索引，快速筛选有效token',
     CONSTRAINT `fk_token_user` FOREIGN KEY (`userId`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户Token存储表';
+
+
+-- 5. 图片表（存储用户上传图片元信息）
+CREATE TABLE IF NOT EXISTS `images` (
+                                        `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '图片主键ID',
+    `userId` bigint(20) NOT NULL COMMENT '关联用户表ID',
+    `fileName` varchar(255) NOT NULL COMMENT '图片原始文件名',
+    `filePath` varchar(500) NOT NULL COMMENT '图片存储路径',
+    `fileSize` bigint(20) NOT NULL COMMENT '图片大小（字节）',
+    `fileType` varchar(50) NOT NULL COMMENT '图片格式（jpg/png等）',
+    `width` int(11) DEFAULT NULL COMMENT '图片宽度（像素）',
+    `height` int(11) DEFAULT NULL COMMENT '图片高度（像素）',
+    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1=正常，0=禁用',
+    `createdAt` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
+    `updatedAt` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_userId` (`userId`),
+    KEY `idx_fileType` (`fileType`),
+    CONSTRAINT `fk_image_user` FOREIGN KEY (`userId`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户图片存储表';
+
+-- 6. 视频表（存储用户上传视频元信息）
+CREATE TABLE IF NOT EXISTS `videos` (
+                                        `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '视频主键ID',
+    `userId` bigint(20) NOT NULL COMMENT '关联用户表ID',
+    `fileName` varchar(255) NOT NULL COMMENT '视频原始文件名',
+    `filePath` varchar(500) NOT NULL COMMENT '视频存储路径',
+    `fileSize` bigint(20) NOT NULL COMMENT '视频大小（字节）',
+    `fileType` varchar(50) NOT NULL COMMENT '视频格式（mp4/mov等）',
+    `duration` float DEFAULT NULL COMMENT '视频时长（秒）',
+    `coverPath` varchar(500) DEFAULT NULL COMMENT '视频封面图路径',
+    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1=正常，0=禁用',
+    `createdAt` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
+    `updatedAt` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_userId` (`userId`),
+    KEY `idx_fileType` (`fileType`),
+    CONSTRAINT `fk_video_user` FOREIGN KEY (`userId`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户视频存储表';
