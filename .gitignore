@@ -34,3 +34,5 @@ build/
 
 ### Application ###
 uploads/
+src/main/resources/model/best.pt
+src/main/resources/model/best.onnx
