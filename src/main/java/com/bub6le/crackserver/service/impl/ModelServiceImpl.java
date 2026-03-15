@@ -4,8 +4,11 @@ import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.bub6le.crackserver.entity.Image;
+import com.bub6le.crackserver.entity.ImageResult;
 import com.bub6le.crackserver.mapper.ImageMapper;
+import com.bub6le.crackserver.mapper.ImageResultMapper;
 import com.bub6le.crackserver.service.ModelService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -22,6 +25,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.FloatBuffer;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.List;
 
@@ -31,6 +35,9 @@ public class ModelServiceImpl implements ModelService {
 
     @Autowired
     private ImageMapper imageMapper;
+    
+    @Autowired
+    private ImageResultMapper imageResultMapper;
 
     private OrtEnvironment env;
     private OrtSession session;
@@ -38,21 +45,24 @@ public class ModelServiceImpl implements ModelService {
     private static final float CONFIDENCE_THRESHOLD = 0.25f;
     private static final float IOU_THRESHOLD = 0.45f;
     private static final String[] LABELS = {"P0", "P1", "P2", "P3"};
+    private static final String MODEL_FILE_NAME = "best.onnx"; // Define constant for model filename
+    private String modelName; // Store the full model name
 
     @PostConstruct
     public void init() {
         try {
             env = OrtEnvironment.getEnvironment();
             // 尝试加载模型，如果不存在则仅记录警告
-            ClassPathResource resource = new ClassPathResource("model/best.onnx");
+            ClassPathResource resource = new ClassPathResource("model/" + MODEL_FILE_NAME);
             if (resource.exists()) {
                 try (InputStream is = resource.getInputStream()) {
                     byte[] modelBytes = is.readAllBytes();
                     session = env.createSession(modelBytes, new OrtSession.SessionOptions());
+                    modelName = "yolov8-" + MODEL_FILE_NAME; // Set the model name
                     log.info("YOLOv8 ONNX model loaded successfully");
                 }
             } else {
-                log.warn("Model file 'best.onnx' not found in resources/model. Please convert 'best.pt' to ONNX format.");
+                log.warn("Model file '{}' not found in resources/model. Please convert 'best.pt' to ONNX format.", MODEL_FILE_NAME);
             }
         } catch (Exception e) {
             log.error("Failed to initialize ONNX model", e);
@@ -110,18 +120,25 @@ public class ModelServiceImpl implements ModelService {
 
         for (Long imageId : imageIds) {
             try {
-                // 1. 获取图片信息
+                // 0. 检查图片是否存在
                 Image image = imageMapper.selectById(imageId);
                 if (image == null) {
                     log.warn("Image ID {} not found", imageId);
                     continue;
                 }
-
-                // 2. 读取文件
-                File file = new File(image.getFilePath());
+                
+                // 1. 读取文件
+                // 如果是相对路径，需要转为绝对路径
+                String filePath = image.getFilePath();
+                File file = new File(filePath);
                 if (!file.exists()) {
-                    log.warn("File not found for Image ID {}: {}", imageId, image.getFilePath());
-                    continue;
+                    // 尝试拼接项目根目录
+                    String projectRoot = System.getProperty("user.dir");
+                    file = new File(projectRoot, filePath);
+                    if (!file.exists()) {
+                        log.warn("File not found for Image ID {}: {}", imageId, filePath);
+                        continue;
+                    }
                 }
 
                 BufferedImage originalImage = ImageIO.read(file);
@@ -129,6 +146,9 @@ public class ModelServiceImpl implements ModelService {
                     log.warn("Invalid image content for Image ID {}", imageId);
                     continue;
                 }
+                
+                // 2. 删除旧结果 (实现"重新检测"逻辑)
+                imageResultMapper.delete(new QueryWrapper<ImageResult>().eq("imageId", imageId));
 
                 // 3. 执行推理
                 float[] floatData = preprocess(originalImage);
@@ -136,13 +156,61 @@ public class ModelServiceImpl implements ModelService {
                 OrtSession.Result result = session.run(Collections.singletonMap(session.getInputNames().iterator().next(), inputTensor));
                 float[][][] output = (float[][][]) result.get(0).getValue();
                 
-                // 4. 后处理并保存结果
+                // 4. 后处理
                 List<Map<String, Object>> detections = postprocess(output[0], originalImage.getWidth(), originalImage.getHeight());
                 batchResults.put(imageId, detections);
+                
+                // 5. 保存结果到数据库
+                // 如果没有检测到任何目标，也需要标记已检测（比如存一条特殊记录，或者更新图片状态）
+                // 之前的逻辑：detections为空则不插入image_results，导致下次查询时认为未检测。
+                // 修正：我们应该在 image 表里增加一个 status 标记，或者插入一条特殊的“无异常”记录？
+                // 更合理的做法：更新 image 表的 status 字段，或者有一个专门的 is_detected 字段。
+                // 鉴于不修改表结构的要求，我们可以依赖“只要查询过详情就算检测过”？
+                // 不行，列表页需要知道状态。
+                // 方案：如果 detections 为空，我们插入一条 dummy 记录？不优雅。
+                // 方案：我们还是需要更新 image 表的状态。
+                // Image 实体里的 status: 1=正常, 0=禁用。
+                // 我们可以借用 status 字段吗？不行，那是逻辑删除用的。
+                // 我们在 ImageResult 表里，如果没有检测结果，是否可以不存？
+                // 如果不存，前端怎么知道是“未检测”还是“检测了但无异常”？
+                // 除非前端认为：只要没有结果就是“未检测”。但这会导致重复检测。
+                // 让我们修改 Image 实体，利用 updatedAt 字段？或者，我们强制要求：
+                // 如果检测结果为空，我们插入一条 label="NORMAL" 的记录？
+                // 这是一个折中方案。
+                
+                if (detections.isEmpty()) {
+                     // 插入一条代表“无异常”的记录，或者前端约定：
+                     // 如果查不到结果，就显示“未检测”？
+                     // 既然用户想要保存“检测状态”，那对于无异常的图片，也应该知道它被检测过了。
+                     // 让我们插入一条特殊的记录：label="NORMAL", score=1.0
+                     ImageResult ir = new ImageResult();
+                     ir.setImageId(imageId);
+                     ir.setLabel("NORMAL"); // 标记无异常
+                     ir.setScore(1.0f);
+                     ir.setX(0f); ir.setY(0f); ir.setWidth(0f); ir.setHeight(0f);
+                     ir.setClassId(-1);
+                     ir.setModelName(modelName != null ? modelName : "Unknown");
+                     ir.setCreatedAt(LocalDateTime.now());
+                     imageResultMapper.insert(ir);
+                } else {
+                    for (Map<String, Object> det : detections) {
+                        ImageResult ir = new ImageResult();
+                        ir.setImageId(imageId);
+                        ir.setLabel((String) det.get("label"));
+                        ir.setScore((Float) det.get("score"));
+                        ir.setX((Float) det.get("x"));
+                        ir.setY((Float) det.get("y"));
+                        ir.setWidth((Float) det.get("width"));
+                        ir.setHeight((Float) det.get("height"));
+                        ir.setClassId((Integer) det.get("classId"));
+                        ir.setModelName(modelName != null ? modelName : "Unknown");
+                        ir.setCreatedAt(LocalDateTime.now());
+                        imageResultMapper.insert(ir);
+                    }
+                }
 
             } catch (Exception e) {
                 log.error("Error processing Image ID {}", imageId, e);
-                // 可以选择记录错误或继续处理下一个
             }
         }
 

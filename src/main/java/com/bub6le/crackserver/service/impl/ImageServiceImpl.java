@@ -10,6 +10,8 @@ import com.bub6le.crackserver.entity.Image;
 import com.bub6le.crackserver.entity.UserToken;
 import com.bub6le.crackserver.mapper.ImageMapper;
 import com.bub6le.crackserver.mapper.UserTokenMapper;
+import com.bub6le.crackserver.entity.ImageResult;
+import com.bub6le.crackserver.mapper.ImageResultMapper;
 import com.bub6le.crackserver.service.ImageService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +32,9 @@ public class ImageServiceImpl implements ImageService {
 
     @Autowired
     private UserTokenMapper userTokenMapper;
+
+    @Autowired
+    private ImageResultMapper imageResultMapper;
 
     // Save path: current directory + /uploads/
     private final String UPLOAD_ROOT = System.getProperty("user.dir") + File.separator + "uploads" + File.separator;
@@ -286,6 +291,37 @@ public class ImageServiceImpl implements ImageService {
         
         String accessUrl = "http://127.0.0.1:7022" + image.getFilePath();
         data.put("accessUrl", accessUrl);
+        
+        // 查询检测结果
+        List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>().eq(ImageResult::getImageId, imageId));
+        if (results != null && !results.isEmpty()) {
+            data.put("isDetected", true);
+            // Get common info from the first result (date, modelName)
+            ImageResult first = results.get(0);
+            data.put("detectionDate", DateUtil.formatDateTime(DateUtil.date(java.sql.Timestamp.valueOf(first.getCreatedAt()))));
+            data.put("modelName", first.getModelName());
+            
+            List<Map<String, Object>> detectionResults = new ArrayList<>();
+            for (ImageResult ir : results) {
+                // 过滤掉 label="NORMAL" 的记录，不返回给前端作为检测框，但保留isDetected=true
+                if ("NORMAL".equals(ir.getLabel())) {
+                    continue;
+                }
+                Map<String, Object> map = new HashMap<>();
+                map.put("label", ir.getLabel());
+                map.put("score", ir.getScore());
+                map.put("x", ir.getX());
+                map.put("y", ir.getY());
+                map.put("width", ir.getWidth());
+                map.put("height", ir.getHeight());
+                map.put("classId", ir.getClassId());
+                detectionResults.add(map);
+            }
+            data.put("results", detectionResults);
+        } else {
+            data.put("isDetected", false);
+            data.put("results", new ArrayList<>());
+        }
         
         result.put("data", data);
         return result;
