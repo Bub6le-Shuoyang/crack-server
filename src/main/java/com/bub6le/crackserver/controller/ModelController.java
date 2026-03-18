@@ -31,5 +31,11 @@ public class ModelController {
     public Map<Long, List<Map<String, Object>>> detectBatch(@RequestBody DetectRequest request) {
         return modelService.detectBatch(request.getImageIds());
     }
+
+    @Operation(summary = "检测视频中的异常", description = "对已上传的视频进行逐帧检测，返回检测到的异常片段信息。")
+    @PostMapping("/detectVideo/{videoId}")
+    public Map<String, Object> detectVideo(@PathVariable("videoId") Long videoId) {
+        return modelService.detectVideo(videoId);
+    }
 }
 

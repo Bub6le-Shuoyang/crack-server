@@ -15,3 +15,5 @@ CREATE TABLE IF NOT EXISTS `image_results` (
     KEY `idx_imageId` (`imageId`),
     CONSTRAINT `fk_result_image` FOREIGN KEY (`imageId`) REFERENCES `images` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='图片检测结果表';
+
+mysql -u root -p -e "ALTER TABLE users ADD COLUMN avatar_url VARCHAR(255) COMMENT '用户头像URL';"

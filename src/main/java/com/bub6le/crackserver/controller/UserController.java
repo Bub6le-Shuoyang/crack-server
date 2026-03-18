@@ -1,20 +1,18 @@
 package com.bub6le.crackserver.controller;
 
-import com.bub6le.crackserver.dto.LoginRequest;
-import com.bub6le.crackserver.dto.RegisterRequest;
-import com.bub6le.crackserver.dto.ResetPasswordRequest;
-import com.bub6le.crackserver.dto.SendCodeRequest;
+import com.bub6le.crackserver.dto.*;
 import com.bub6le.crackserver.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 
-@Tag(name = "用户管理", description = "用户登录、注册、找回密码等接口")
+@Tag(name = "用户管理", description = "用户登录、注册、找回密码及个人信息修改接口")
 @RestController
 @RequestMapping("/api/user")
 @Slf4j
@@ -86,5 +84,23 @@ public class UserController {
         Map<String, Object> res = userService.logout(token);
         log.info("登出结果 ok={}", res.get("ok"));
         return res;
+    }
+
+    @Operation(summary = "修改基础个人信息（姓名 / 邮箱）")
+    @PostMapping("/update-profile")
+    public Map<String, Object> updateProfile(@RequestBody UpdateProfileRequest requestBody, @RequestHeader(value = "Authorization", required = false) String token) {
+        return userService.updateProfile(requestBody, token);
+    }
+
+    @Operation(summary = "上传 / 修改用户头像")
+    @PostMapping("/update-avatar")
+    public Map<String, Object> updateAvatar(@RequestParam("file") MultipartFile file, @RequestHeader(value = "Authorization", required = false) String token) {
+        return userService.updateAvatar(file, token);
+    }
+
+    @Operation(summary = "修改登录密码（用户自主修改）")
+    @PostMapping("/update-password")
+    public Map<String, Object> updatePassword(@RequestBody UpdatePasswordRequest requestBody, @RequestHeader(value = "Authorization", required = false) String token) {
+        return userService.updatePassword(requestBody, token);
     }
 }

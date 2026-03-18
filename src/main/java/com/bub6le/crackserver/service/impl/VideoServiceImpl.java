@@ -21,6 +21,12 @@ import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
 
+import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.Frame;
+import org.bytedeco.javacv.Java2DFrameConverter;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+
 @Service
 @Slf4j
 public class VideoServiceImpl implements VideoService {
@@ -91,12 +97,40 @@ public class VideoServiceImpl implements VideoService {
             FileUtil.touch(dest);
             file.transferTo(dest);
 
-            // Handle cover generation (Mock implementation)
+            double durationInSeconds = 0.0;
             String coverPath = null;
-            if (Boolean.TRUE.equals(generateCover)) {
-                // TODO: Implement real video cover generation using ffmpeg or similar
-                // For now, we skip it or use a default if available
-                // coverPath = "/uploads/videos/cover/" + dateDir + "/" + IdUtil.simpleUUID() + ".jpg";
+            
+            try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(dest)) {
+                grabber.start();
+                durationInSeconds = grabber.getLengthInTime() / 1000000.0;
+                
+                if (durationInSeconds > 180.0) {
+                    grabber.stop();
+                    FileUtil.del(dest);
+                    result.put("error", true);
+                    result.put("message", "视频时长不能超过3分钟");
+                    result.put("code", "DURATION_EXCEEDED");
+                    return result;
+                }
+                
+                if (Boolean.TRUE.equals(generateCover)) {
+                    Frame frame = grabber.grabImage();
+                    if (frame != null) {
+                        try (Java2DFrameConverter converter = new Java2DFrameConverter()) {
+                            BufferedImage bufferedImage = converter.getBufferedImage(frame);
+                            String coverName = IdUtil.simpleUUID() + ".jpg";
+                            String coverRelativePath = "/uploads/videos/cover/" + dateDir + "/" + coverName;
+                            String coverAbsolutePath = UPLOAD_ROOT + "videos" + File.separator + "cover" + File.separator + dateDir + File.separator + coverName;
+                            File coverFile = new File(coverAbsolutePath);
+                            FileUtil.touch(coverFile);
+                            ImageIO.write(bufferedImage, "jpg", coverFile);
+                            coverPath = coverRelativePath;
+                        }
+                    }
+                }
+                grabber.stop();
+            } catch (Exception e) {
+                log.warn("处理视频失败: {}", dest.getAbsolutePath(), e);
             }
 
             Video video = new Video();
@@ -105,7 +139,7 @@ public class VideoServiceImpl implements VideoService {
             video.setFilePath(relativePath);
             video.setFileSize(file.getSize());
             video.setFileType(ext);
-            video.setDuration(0.0); // Placeholder
+            video.setDuration(durationInSeconds);
             video.setCoverPath(coverPath);
             video.setStatus(1);
             video.setCreatedAt(LocalDateTime.now());
@@ -159,7 +193,22 @@ public class VideoServiceImpl implements VideoService {
 
         result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
-        data.put("list", videoPage.getRecords());
+        
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Video v : videoPage.getRecords()) {
+            Map<String, Object> map = new HashMap<>();
+            map.put("videoId", v.getId());
+            map.put("fileName", v.getFileName());
+            map.put("filePath", v.getFilePath());
+            map.put("fileSize", v.getFileSize());
+            map.put("fileType", v.getFileType());
+            map.put("duration", v.getDuration());
+            map.put("coverPath", v.getCoverPath());
+            map.put("createdAt", DateUtil.format(v.getCreatedAt(), "yyyy-MM-dd HH:mm:ss"));
+            list.add(map);
+        }
+        
+        data.put("list", list);
         data.put("total", videoPage.getTotal());
         data.put("page", videoPage.getCurrent());
         data.put("pageSize", videoPage.getSize());

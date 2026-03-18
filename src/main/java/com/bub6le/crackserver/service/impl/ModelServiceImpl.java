@@ -7,8 +7,12 @@ import ai.onnxruntime.OrtSession;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.bub6le.crackserver.entity.Image;
 import com.bub6le.crackserver.entity.ImageResult;
+import com.bub6le.crackserver.entity.Video;
+import com.bub6le.crackserver.entity.VideoResult;
 import com.bub6le.crackserver.mapper.ImageMapper;
 import com.bub6le.crackserver.mapper.ImageResultMapper;
+import com.bub6le.crackserver.mapper.VideoMapper;
+import com.bub6le.crackserver.mapper.VideoResultMapper;
 import com.bub6le.crackserver.service.ModelService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -18,6 +22,9 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.Frame;
+import org.bytedeco.javacv.Java2DFrameConverter;
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -215,6 +222,147 @@ public class ModelServiceImpl implements ModelService {
         }
 
         return batchResults;
+    }
+
+    @Autowired
+    private VideoMapper videoMapper;
+
+    @Autowired
+    private VideoResultMapper videoResultMapper;
+
+    @Override
+    public Map<String, Object> detectVideo(Long videoId) {
+        Map<String, Object> result = new HashMap<>();
+        if (session == null) {
+            result.put("error", true);
+            result.put("message", "模型未初始化");
+            return result;
+        }
+
+        Video video = videoMapper.selectById(videoId);
+        if (video == null) {
+            result.put("error", true);
+            result.put("message", "视频不存在");
+            return result;
+        }
+
+        String projectRoot = System.getProperty("user.dir");
+        String filePath = video.getFilePath();
+        File file = new File(filePath);
+        if (!file.exists()) {
+            file = new File(projectRoot, filePath);
+            if (!file.exists()) {
+                result.put("error", true);
+                result.put("message", "视频文件丢失");
+                return result;
+            }
+        }
+        
+        // 删除旧结果 (实现"重新检测"逻辑)
+        videoResultMapper.delete(new QueryWrapper<VideoResult>().eq("video_id", videoId));
+
+        List<Map<String, Object>> anomalyFrames = new ArrayList<>();
+        int totalFramesProcessed = 0;
+        int anomalyCount = 0;
+
+        try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(file)) {
+            grabber.start();
+            double frameRate = grabber.getFrameRate();
+            int lengthInFrames = grabber.getLengthInFrames();
+            // 每秒抽2帧进行检测以平衡性能和精度
+            double sampleRate = 2.0; 
+            int step = (int) Math.max(1, Math.round(frameRate / sampleRate));
+
+            try (Java2DFrameConverter converter = new Java2DFrameConverter()) {
+                for (int i = 0; i < lengthInFrames; i += step) {
+                    grabber.setFrameNumber(i);
+                    Frame frame = grabber.grabImage();
+                    if (frame == null) continue;
+
+                    BufferedImage bufferedImage = converter.getBufferedImage(frame);
+                    if (bufferedImage == null) continue;
+
+                    totalFramesProcessed++;
+                    
+                    // 推理
+                    float[] floatData = preprocess(bufferedImage);
+                    OnnxTensor inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatData), new long[]{1, 3, INPUT_SIZE, INPUT_SIZE});
+                    OrtSession.Result ortResult = session.run(Collections.singletonMap(session.getInputNames().iterator().next(), inputTensor));
+                    float[][][] output = (float[][][]) ortResult.get(0).getValue();
+                    
+                    List<Map<String, Object>> detections = postprocess(output[0], bufferedImage.getWidth(), bufferedImage.getHeight());
+                    
+                    if (!detections.isEmpty()) {
+                        anomalyCount += detections.size();
+                        double timestampSeconds = i / frameRate;
+                        Map<String, Object> frameResult = new HashMap<>();
+                        frameResult.put("time", timestampSeconds);
+                        frameResult.put("timeFormatted", formatTime(timestampSeconds));
+                        frameResult.put("frameNumber", i);
+                        frameResult.put("detections", detections);
+                        anomalyFrames.add(frameResult);
+                        
+                        // 保存检测到的异常结果到数据库
+                        for (Map<String, Object> det : detections) {
+                            VideoResult vr = new VideoResult();
+                            vr.setVideoId(videoId);
+                            vr.setFrameNumber(i);
+                            vr.setTimestampSec(timestampSeconds);
+                            vr.setLabel((String) det.get("label"));
+                            vr.setScore((Float) det.get("score"));
+                            vr.setX((Float) det.get("x"));
+                            vr.setY((Float) det.get("y"));
+                            vr.setWidth((Float) det.get("width"));
+                            vr.setHeight((Float) det.get("height"));
+                            vr.setClassId((Integer) det.get("classId"));
+                            vr.setModelName(modelName != null ? modelName : "Unknown");
+                            vr.setCreatedAt(LocalDateTime.now());
+                            videoResultMapper.insert(vr);
+                        }
+                    }
+                }
+            }
+            grabber.stop();
+            
+            // 如果没有任何异常，存一条标记数据
+            if (anomalyCount == 0) {
+                VideoResult vr = new VideoResult();
+                vr.setVideoId(videoId);
+                vr.setFrameNumber(0);
+                vr.setTimestampSec(0.0);
+                vr.setLabel("NORMAL");
+                vr.setScore(1.0f);
+                vr.setX(0f); vr.setY(0f); vr.setWidth(0f); vr.setHeight(0f);
+                vr.setClassId(-1);
+                vr.setModelName(modelName != null ? modelName : "Unknown");
+                vr.setCreatedAt(LocalDateTime.now());
+                videoResultMapper.insert(vr);
+            }
+            
+        } catch (Exception e) {
+            log.error("Video detection failed for videoId {}", videoId, e);
+            result.put("error", true);
+            result.put("message", "视频检测失败: " + e.getMessage());
+            return result;
+        }
+
+        result.put("ok", true);
+        result.put("message", "视频检测完成");
+        Map<String, Object> data = new HashMap<>();
+        data.put("videoId", videoId);
+        data.put("totalFramesProcessed", totalFramesProcessed);
+        data.put("anomalyCount", anomalyCount);
+        data.put("anomalyFrames", anomalyFrames); // 仅包含有异常的帧信息
+        result.put("data", data);
+
+        return result;
+    }
+
+    private String formatTime(double seconds) {
+        int m = (int) (seconds / 60);
+        int s = (int) (seconds % 60);
+        int ms = (int) ((seconds - (m * 60 + s)) * 1000);
+        return String.format("%02d:%02d.%03d", m, s, ms);
     }
 
     private float[] preprocess(BufferedImage originalImage) {
