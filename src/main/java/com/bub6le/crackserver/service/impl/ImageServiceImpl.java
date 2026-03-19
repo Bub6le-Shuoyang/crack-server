@@ -144,7 +144,7 @@ public class ImageServiceImpl implements ImageService {
     }
 
     @Override
-    public Map<String, Object> listImages(int page, int pageSize, String fileType, String token) {
+    public Map<String, Object> listImages(int page, int pageSize, String fileType, String keyword, String label, String token) {
         Map<String, Object> result = new HashMap<>();
         Long userId = getUserIdByToken(token);
         if (userId == null) {
@@ -155,16 +155,30 @@ public class ImageServiceImpl implements ImageService {
         }
 
         Page<Image> p = new Page<>(page, pageSize);
-        LambdaQueryWrapper<Image> wrapper = new LambdaQueryWrapper<Image>()
-                .eq(Image::getUserId, userId)
-                .eq(Image::getStatus, 1) // Only show valid images
-                .orderByDesc(Image::getCreatedAt);
+        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<Image> queryWrapper = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
+        queryWrapper.eq("userId", userId)
+                    .eq("status", 1);
         
         if (fileType != null && !fileType.isEmpty()) {
-            wrapper.eq(Image::getFileType, fileType);
+            queryWrapper.eq("fileType", fileType);
         }
 
-        Page<Image> imagePage = imageMapper.selectPage(p, wrapper);
+        if (keyword != null && !keyword.isEmpty()) {
+            // Search function: Filter by fileName
+            queryWrapper.like("fileName", keyword);
+        }
+
+        // Label prioritization logic: matches go first, others follow
+        if (label != null && !label.isEmpty()) {
+            // Sort by whether the image has the specified label (1 for match, 0 for no match)
+            // In MySQL, DESC puts 1 (match) before 0 (no match)
+            queryWrapper.orderByDesc("(SELECT COUNT(1) FROM image_results ir WHERE ir.imageId = images.id AND ir.label = '" + label + "')");
+        }
+
+        // Always use createdAt as a tie-breaker or primary sort
+        queryWrapper.orderByDesc("createdAt");
+
+        Page<Image> imagePage = imageMapper.selectPage(p, queryWrapper);
 
         result.put("ok", true);
         Map<String, Object> data = new HashMap<>();

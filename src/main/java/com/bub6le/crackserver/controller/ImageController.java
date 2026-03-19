@@ -35,9 +35,11 @@ public class ImageController {
             @RequestParam(value = "page", defaultValue = "1") int page,
             @RequestParam(value = "pageSize", defaultValue = "10") int pageSize,
             @RequestParam(value = "fileType", required = false) String fileType,
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "label", required = false) String label,
             @RequestHeader(value = "Authorization", required = false) String token) {
-        log.info("请求获取图片列表 page={} pageSize={}", page, pageSize);
-        return imageService.listImages(page, pageSize, fileType, token);
+        log.info("请求获取图片列表 page={} pageSize={} keyword={} label={}", page, pageSize, keyword, label);
+        return imageService.listImages(page, pageSize, fileType, keyword, label, token);
     }
 
     @Operation(summary = "删除图片接口")
