@@ -3,6 +3,8 @@ package com.bub6le.crackserver.service.impl;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.NumberUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.bub6le.crackserver.common.Result;
+import com.bub6le.crackserver.common.UserContext;
 import com.bub6le.crackserver.entity.*;
 import com.bub6le.crackserver.mapper.*;
 import com.bub6le.crackserver.service.StatisticsService;
@@ -21,24 +23,13 @@ import java.util.stream.Collectors;
 public class StatisticsServiceImpl implements StatisticsService {
 
     private final UserMapper userMapper;
-    private final UserTokenMapper userTokenMapper;
     private final ImageMapper imageMapper;
     private final VideoMapper videoMapper;
     private final ImageResultMapper imageResultMapper;
     private final VideoResultMapper videoResultMapper;
 
-    private Long getUserIdByToken(String token) {
-        if (token == null) return null;
-        if (token.startsWith("Bearer ")) token = token.substring(7);
-        UserToken userToken = userTokenMapper.selectOne(new LambdaQueryWrapper<UserToken>()
-                .eq(UserToken::getToken, token)
-                .eq(UserToken::getIsValid, 1)
-                .gt(UserToken::getExpiredAt, LocalDateTime.now()));
-        return userToken != null ? userToken.getUserId() : null;
-    }
-
-    private User getUserByToken(String token) {
-        Long userId = getUserIdByToken(token);
+    private User getCurrentUser() {
+        Long userId = UserContext.getUserId();
         return userId != null ? userMapper.selectById(userId) : null;
     }
 
@@ -53,13 +44,10 @@ public class StatisticsServiceImpl implements StatisticsService {
     }
 
     @Override
-    public Map<String, Object> getImageOverview(String scope, String startDate, String endDate, String token) {
-        Map<String, Object> result = new HashMap<>();
-        User user = getUserByToken(token);
+    public Result getImageOverview(String scope, String startDate, String endDate) {
+        User user = getCurrentUser();
         if (user == null) {
-            result.put("error", true);
-            result.put("message", "Token无效");
-            return result;
+            return Result.error("INVALID_TOKEN", "Token无效");
         }
 
         boolean isAdmin = "2".equals(user.getRoleId());
@@ -132,24 +120,20 @@ public class StatisticsServiceImpl implements StatisticsService {
         });
         dailyTrend.sort(Comparator.comparing(o -> (String) o.get("date")));
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("totalImages", totalImages);
         data.put("totalAnomalyImages", totalAnomalyImages);
         data.put("anomalyRate", anomalyRate);
         data.put("topAnomalyType", topAnomalyType);
         data.put("dailyTrend", dailyTrend);
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getVideoDetail(Long videoId, String token) {
-        Map<String, Object> result = new HashMap<>();
+    public Result getVideoDetail(Long videoId) {
         Video video = videoMapper.selectById(videoId);
         if (video == null) {
-            result.put("error", true); 
-            return result; 
+            return Result.error("VIDEO_NOT_FOUND", "视频不存在");
         }
 
         LambdaQueryWrapper<VideoResult> wrapper = new LambdaQueryWrapper<>();
@@ -192,7 +176,6 @@ public class StatisticsServiceImpl implements StatisticsService {
             typeDist.add(m);
         });
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("videoId", video.getId());
         data.put("fileName", video.getFileName());
@@ -201,25 +184,20 @@ public class StatisticsServiceImpl implements StatisticsService {
         data.put("anomalyTimeRatio", anomalyTimeRatio);
         data.put("topAnomalyFrames", topFrames);
         data.put("anomalyTypeDistribution", typeDist);
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getAdminTotalOverview(String type, String timeRange, String token) {
-        Map<String, Object> result = new HashMap<>();
-        User user = getUserByToken(token);
+    public Result getAdminTotalOverview(String type, String timeRange) {
+        User user = getCurrentUser();
         if (user == null || !"2".equals(user.getRoleId())) {
-            result.put("error", true);
-            result.put("message", "无权限");
-            return result;
+            return Result.error("NO_PERMISSION", "无权限");
         }
         
         long totalUsers = userMapper.selectCount(null);
         long totalImageDetect = imageMapper.selectCount(null);
         long totalVideoDetect = videoMapper.selectCount(null);
         
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("totalUsers", totalUsers);
         data.put("totalImageDetect", totalImageDetect);
@@ -228,56 +206,43 @@ public class StatisticsServiceImpl implements StatisticsService {
         data.put("totalAnomalyVideos", totalVideoDetect / 4); 
         data.put("userAnomalyRank", new ArrayList<>()); 
         data.put("timeRangeData", new HashMap<>()); 
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getAnomalyTypeDistribution(String mediaType, String startDate, String endDate, String token) {
-        Map<String, Object> result = new HashMap<>();
-        
+    public Result getAnomalyTypeDistribution(String mediaType, String startDate, String endDate) {
         List<Map<String, Object>> distribution = new ArrayList<>();
         Map<String, Object> d1 = new HashMap<>(); d1.put("label", "P0"); d1.put("count", 45); d1.put("percentage", 37.5);
         distribution.add(d1);
         
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("mediaType", mediaType);
         data.put("totalAnomalies", 120);
         data.put("distribution", distribution);
         data.put("confidenceDistribution", new ArrayList<>());
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getUserRegisterTrend(String scope, String type, String startDate, String endDate, String token) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("ok", true);
+    public Result getUserRegisterTrend(String scope, String type, String startDate, String endDate) {
         Map<String, Object> data = new HashMap<>();
         data.put("totalRegister", 50);
         data.put("trendData", new ArrayList<>());
         data.put("registerRate", 2.5);
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getUserActivity(String scope, String timeRange, String token) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("ok", true);
+    public Result getUserActivity(String scope, String timeRange) {
         Map<String, Object> data = new HashMap<>();
         data.put("activeUsers", 35);
         data.put("inactiveUsers", 15);
         data.put("loginTrend", new ArrayList<>());
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getUserDistribution(String token) {
-        Map<String, Object> result = new HashMap<>();
-        
+    public Result getUserDistribution() {
         long totalUsers = userMapper.selectCount(null);
         long adminCount = userMapper.selectCount(new LambdaQueryWrapper<User>().eq(User::getRoleId, "2"));
         long normalCount = totalUsers - adminCount;
@@ -285,7 +250,6 @@ public class StatisticsServiceImpl implements StatisticsService {
         long activeCount = userMapper.selectCount(new LambdaQueryWrapper<User>().eq(User::getStatus, 1));
         long inactiveCount = totalUsers - activeCount;
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("totalUsers", totalUsers);
         
@@ -303,29 +267,25 @@ public class StatisticsServiceImpl implements StatisticsService {
         statusList.add(s2);
         data.put("statusDistribution", statusList);
         
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getUserUploadStat(Long userId, String startDate, String endDate, String token) {
-        Map<String, Object> result = new HashMap<>();
+    public Result getUserUploadStat(Long userId, String startDate, String endDate) {
         User targetUser;
         if (userId != null) {
             targetUser = userMapper.selectById(userId);
         } else {
-            targetUser = getUserByToken(token);
+            targetUser = getCurrentUser();
         }
         
         if (targetUser == null) {
-             result.put("error", true);
-             return result;
+             return Result.error("USER_NOT_FOUND", "用户不存在");
         }
 
         long imgCount = imageMapper.selectCount(new LambdaQueryWrapper<Image>().eq(Image::getUserId, targetUser.getId()));
         long vidCount = videoMapper.selectCount(new LambdaQueryWrapper<Video>().eq(Video::getUserId, targetUser.getId()));
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("userId", targetUser.getId());
         data.put("userName", targetUser.getName());
@@ -340,7 +300,6 @@ public class StatisticsServiceImpl implements StatisticsService {
         vidMap.put("count", vidCount);
         data.put("videoUpload", vidMap);
         
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 }

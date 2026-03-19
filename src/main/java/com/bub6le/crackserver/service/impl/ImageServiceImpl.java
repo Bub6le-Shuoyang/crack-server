@@ -5,23 +5,27 @@ import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.file.FileNameUtil;
 import cn.hutool.core.util.IdUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.bub6le.crackserver.common.Result;
+import com.bub6le.crackserver.common.UserContext;
 import com.bub6le.crackserver.entity.Image;
-import com.bub6le.crackserver.entity.UserToken;
-import com.bub6le.crackserver.mapper.ImageMapper;
-import com.bub6le.crackserver.mapper.UserTokenMapper;
 import com.bub6le.crackserver.entity.ImageResult;
+import com.bub6le.crackserver.mapper.ImageMapper;
 import com.bub6le.crackserver.mapper.ImageResultMapper;
 import com.bub6le.crackserver.service.ImageService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -31,81 +35,52 @@ public class ImageServiceImpl implements ImageService {
     private ImageMapper imageMapper;
 
     @Autowired
-    private UserTokenMapper userTokenMapper;
-
-    @Autowired
     private ImageResultMapper imageResultMapper;
 
-    // Save path: current directory + /uploads/
-    private final String UPLOAD_ROOT = System.getProperty("user.dir") + File.separator + "uploads" + File.separator;
+    @Value("${app.upload.root:${user.dir}/uploads/}")
+    private String uploadRoot;
 
-    private Long getUserIdByToken(String token) {
-        if (token == null) return null;
-        if (token.startsWith("Bearer ")) {
-            token = token.substring(7);
-        }
-        UserToken userToken = userTokenMapper.selectOne(new LambdaQueryWrapper<UserToken>()
-                .eq(UserToken::getToken, token)
-                .eq(UserToken::getIsValid, 1)
-                .gt(UserToken::getExpiredAt, LocalDateTime.now()));
-        return userToken != null ? userToken.getUserId() : null;
-    }
+    @Value("${app.base-url:http://127.0.0.1:7022}")
+    private String baseUrl;
+
+    private static final long MAX_FILE_SIZE = 10 * 1024 * 1024L; // 10MB
+    private static final List<String> SUPPORTED_EXTENSIONS = Arrays.asList("jpg", "jpeg", "png", "webp");
 
     @Override
-    public Map<String, Object> uploadImage(MultipartFile file, String description, String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    public Result uploadImage(MultipartFile file, String description) {
+        Long userId = UserContext.getUserId();
 
         if (file.isEmpty()) {
-            result.put("error", true);
-            result.put("message", "请选择要上传的图片");
-            result.put("code", "EMPTY_FILE");
-            return result;
+            return Result.error("EMPTY_FILE", "请选择要上传的图片");
         }
 
-        // Check file size (10MB)
-        if (file.getSize() > 10 * 1024 * 1024) {
-            result.put("error", true);
-            result.put("message", "图片大小不能超过10MB");
-            result.put("code", "FILE_TOO_LARGE");
-            return result;
+        if (file.getSize() > MAX_FILE_SIZE) {
+            return Result.error("FILE_TOO_LARGE", "图片大小不能超过10MB");
         }
 
-        // Check file type
         String originalFilename = file.getOriginalFilename();
         String ext = FileNameUtil.extName(originalFilename).toLowerCase();
-        if (!Arrays.asList("jpg", "jpeg", "png", "webp").contains(ext)) {
-            result.put("error", true);
-            result.put("message", "仅支持jpg/png/webp格式的图片");
-            result.put("code", "UNSUPPORTED_FILE_TYPE");
-            return result;
+        if (!SUPPORTED_EXTENSIONS.contains(ext)) {
+            return Result.error("UNSUPPORTED_FILE_TYPE", "仅支持jpg/png/webp格式的图片");
         }
 
         try {
-            // Generate path: uploads/images/yyyyMMdd/filename
             String dateDir = DateUtil.format(new Date(), "yyyyMMdd");
             String newFileName = IdUtil.simpleUUID() + "." + ext;
             String relativePath = "/uploads/images/" + dateDir + "/" + newFileName;
-            String absolutePath = UPLOAD_ROOT + "images" + File.separator + dateDir + File.separator + newFileName;
+            String absolutePath = uploadRoot + "images" + File.separator + dateDir + File.separator + newFileName;
 
             File dest = new File(absolutePath);
-            FileUtil.touch(dest); // Ensure parent directories exist
+            FileUtil.touch(dest);
             file.transferTo(dest);
 
-            // Save to DB
             Image image = new Image();
             image.setUserId(userId);
             image.setFileName(originalFilename);
-            image.setFilePath(relativePath); // Store relative path for access
+            image.setFilePath(relativePath);
             image.setFileSize(file.getSize());
             image.setFileType(ext);
-            // Get width/height if possible (skipping for now to avoid extra deps or complex logic, setting to 0 or null)
+            
             try {
                 java.awt.image.BufferedImage bi = javax.imageio.ImageIO.read(dest);
                 if (bi != null) {
@@ -121,8 +96,6 @@ public class ImageServiceImpl implements ImageService {
             image.setUpdatedAt(LocalDateTime.now());
             imageMapper.insert(image);
 
-            result.put("ok", true);
-            result.put("message", "图片上传成功");
             Map<String, Object> data = new HashMap<>();
             data.put("imageId", image.getId());
             data.put("fileName", image.getFileName());
@@ -131,28 +104,18 @@ public class ImageServiceImpl implements ImageService {
             data.put("fileType", image.getFileType());
             data.put("width", image.getWidth());
             data.put("height", image.getHeight());
-            result.put("data", data);
+            
+            return Result.success("图片上传成功").put("data", data);
 
         } catch (IOException e) {
             log.error("Image upload failed", e);
-            result.put("error", true);
-            result.put("message", "图片上传失败，请重试");
-            result.put("code", "UPLOAD_FAILED");
+            return Result.error("UPLOAD_FAILED", "图片上传失败，请重试");
         }
-
-        return result;
     }
 
     @Override
-    public Map<String, Object> listImages(int page, int pageSize, String fileType, String keyword, String label, String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    public Result listImages(int page, int pageSize, String fileType, String keyword, String label) {
+        Long userId = UserContext.getUserId();
 
         Page<Image> p = new Page<>(page, pageSize);
         com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<Image> queryWrapper = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
@@ -164,64 +127,41 @@ public class ImageServiceImpl implements ImageService {
         }
 
         if (keyword != null && !keyword.isEmpty()) {
-            // Search function: Filter by fileName
             queryWrapper.like("fileName", keyword);
         }
 
-        // Label prioritization logic: matches go first, others follow
         if (label != null && !label.isEmpty()) {
-            // Sort by whether the image has the specified label (1 for match, 0 for no match)
-            // In MySQL, DESC puts 1 (match) before 0 (no match)
             queryWrapper.orderByDesc("(SELECT COUNT(1) FROM image_results ir WHERE ir.imageId = images.id AND ir.label = '" + label + "')");
         }
 
-        // Always use createdAt as a tie-breaker or primary sort
         queryWrapper.orderByDesc("createdAt");
 
         Page<Image> imagePage = imageMapper.selectPage(p, queryWrapper);
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("list", imagePage.getRecords());
         data.put("total", imagePage.getTotal());
         data.put("page", imagePage.getCurrent());
         data.put("pageSize", imagePage.getSize());
-        result.put("data", data);
-
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> deleteImage(Long imageId, String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    public Result deleteImage(Long imageId) {
+        Long userId = UserContext.getUserId();
 
         Image image = imageMapper.selectById(imageId);
         if (image == null || !image.getUserId().equals(userId)) {
-            result.put("error", true);
-            result.put("message", "图片不存在或无权限删除");
-            result.put("code", "IMAGE_NOT_FOUND");
-            return result;
+            return Result.error("IMAGE_NOT_FOUND", "图片不存在或无权限删除");
         }
 
-        // Logical delete in DB
         image.setStatus(0);
         image.setUpdatedAt(LocalDateTime.now());
         imageMapper.updateById(image);
 
-        // Physical delete
         try {
             String storedPath = image.getFilePath();
-            String relativePath = storedPath.startsWith("/") ? storedPath.substring(1) : storedPath;
-            String projectRoot = System.getProperty("user.dir");
-            String fullPath = projectRoot + storedPath; 
-            
+            String fullPath = uploadRoot.replace("uploads/", "") + storedPath; 
             if (FileUtil.exist(fullPath)) {
                 FileUtil.del(fullPath);
             }
@@ -229,68 +169,39 @@ public class ImageServiceImpl implements ImageService {
             log.warn("Physical file deletion failed for imageId=" + imageId, e);
         }
 
-        result.put("ok", true);
-        result.put("message", "图片删除成功");
-        return result;
+        return Result.success("图片删除成功");
     }
 
     @Override
-    public Map<String, Object> getImageIds(String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    public Result getImageIds() {
+        Long userId = UserContext.getUserId();
 
         List<Image> images = imageMapper.selectList(new LambdaQueryWrapper<Image>()
                 .eq(Image::getUserId, userId)
                 .eq(Image::getStatus, 1)
                 .select(Image::getId));
         
-        List<Long> imageIds = new ArrayList<>();
-        for (Image img : images) {
-            imageIds.add(img.getId());
-        }
+        List<Long> imageIds = images.stream().map(Image::getId).collect(Collectors.toList());
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("userId", userId);
         data.put("imageIds", imageIds);
-        result.put("data", data);
-
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> getImageById(Long imageId, String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    public Result getImageById(Long imageId) {
+        Long userId = UserContext.getUserId();
 
         Image image = imageMapper.selectById(imageId);
         if (image == null || image.getStatus() == 0) {
-            result.put("error", true);
-            result.put("message", "图片不存在");
-            result.put("code", "IMAGE_NOT_FOUND");
-            return result;
+            return Result.error("IMAGE_NOT_FOUND", "图片不存在");
         }
 
         if (!image.getUserId().equals(userId)) {
-            result.put("error", true);
-            result.put("message", "无权限访问该图片");
-            result.put("code", "NO_PERMISSION");
-            return result;
+            return Result.error("NO_PERMISSION", "无权限访问该图片");
         }
 
-        result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
         data.put("imageId", image.getId());
         data.put("userId", image.getUserId());
@@ -303,21 +214,18 @@ public class ImageServiceImpl implements ImageService {
         data.put("status", image.getStatus());
         data.put("createdAt", DateUtil.formatDateTime(DateUtil.date(java.sql.Timestamp.valueOf(image.getCreatedAt()))));
         
-        String accessUrl = "http://127.0.0.1:7022" + image.getFilePath();
+        String accessUrl = baseUrl + image.getFilePath();
         data.put("accessUrl", accessUrl);
         
-        // 查询检测结果
         List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>().eq(ImageResult::getImageId, imageId));
         if (results != null && !results.isEmpty()) {
             data.put("isDetected", true);
-            // Get common info from the first result (date, modelName)
             ImageResult first = results.get(0);
             data.put("detectionDate", DateUtil.formatDateTime(DateUtil.date(java.sql.Timestamp.valueOf(first.getCreatedAt()))));
             data.put("modelName", first.getModelName());
             
             List<Map<String, Object>> detectionResults = new ArrayList<>();
             for (ImageResult ir : results) {
-                // 过滤掉 label="NORMAL" 的记录，不返回给前端作为检测框，但保留isDetected=true
                 if ("NORMAL".equals(ir.getLabel())) {
                     continue;
                 }
@@ -337,34 +245,28 @@ public class ImageServiceImpl implements ImageService {
             data.put("results", new ArrayList<>());
         }
         
-        result.put("data", data);
-        return result;
+        return Result.success().put("data", data);
     }
 
     @Override
-    public Map<String, Object> batchDeleteImages(List<Long> imageIds, String token) {
-        Map<String, Object> result = new HashMap<>();
-        Long userId = getUserIdByToken(token);
-        if (userId == null) {
-            result.put("error", true);
-            result.put("message", "Token无效或已过期");
-            result.put("code", "INVALID_TOKEN");
-            return result;
-        }
+    @Transactional(rollbackFor = Exception.class)
+    public Result batchDeleteImages(List<Long> imageIds) {
+        Long userId = UserContext.getUserId();
 
         if (imageIds == null || imageIds.isEmpty()) {
-            result.put("error", true);
-            result.put("message", "请选择要删除的图片");
-            result.put("code", "EMPTY_IMAGE_IDS");
-            return result;
+            return Result.error("EMPTY_IMAGE_IDS", "请选择要删除的图片");
         }
 
+        // Fetch all images in one query to avoid N+1 problem
+        List<Image> images = imageMapper.selectBatchIds(imageIds);
+        
         List<Long> successIds = new ArrayList<>();
         List<Long> failIds = new ArrayList<>();
         Map<String, String> failReasons = new HashMap<>();
 
         for (Long id : imageIds) {
-            Image image = imageMapper.selectById(id);
+            Image image = images.stream().filter(img -> img.getId().equals(id)).findFirst().orElse(null);
+            
             if (image == null || image.getStatus() == 0) {
                 failIds.add(id);
                 failReasons.put(String.valueOf(id), "图片不存在");
@@ -377,26 +279,26 @@ public class ImageServiceImpl implements ImageService {
                 continue;
             }
 
+            successIds.add(id);
             try {
-                // Logical
-                image.setStatus(0);
-                image.setUpdatedAt(LocalDateTime.now());
-                imageMapper.updateById(image);
-
-                // Physical
-                String projectRoot = System.getProperty("user.dir");
-                String fullPath = projectRoot + image.getFilePath();
+                String fullPath = uploadRoot.replace("uploads/", "") + image.getFilePath();
                 if (FileUtil.exist(fullPath)) {
                     FileUtil.del(fullPath);
                 }
-                successIds.add(id);
             } catch (Exception e) {
-                log.error("Failed to delete image id=" + id, e);
-                failIds.add(id);
-                failReasons.put(String.valueOf(id), "删除失败: " + e.getMessage());
+                log.warn("Physical file deletion failed for imageId=" + id, e);
             }
         }
 
+        // Batch update database (logical delete)
+        if (!successIds.isEmpty()) {
+            imageMapper.update(null, new LambdaUpdateWrapper<Image>()
+                    .in(Image::getId, successIds)
+                    .set(Image::getStatus, 0)
+                    .set(Image::getUpdatedAt, LocalDateTime.now()));
+        }
+
+        Result result = new Result();
         if (successIds.isEmpty() && !failIds.isEmpty()) {
             result.put("ok", false);
             result.put("message", "批量删除失败");
