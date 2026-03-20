@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `email` varchar(100) NOT NULL COMMENT '用户邮箱（登录账号）',
     `password` varchar(255) NOT NULL COMMENT '加密后的密码（建议BCrypt）',
     `name` varchar(50) NOT NULL COMMENT '用户姓名',
+    `avatarUrl` varchar(500) DEFAULT NULL COMMENT '用户头像地址',
     `roleId` varchar(10) NOT NULL DEFAULT '1' COMMENT '关联角色表ID',
     `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '账号状态：1=正常，0=禁用',
     `lastLoginAt` datetime DEFAULT NULL COMMENT '最后登录时间',

@@ -75,6 +75,44 @@ public class UserController {
         return res;
     }
 
+    @Operation(summary = "修改个人信息接口")
+    @PostMapping("/update-profile")
+    public Map<String, Object> updateProfile(
+            @RequestBody com.bub6le.crackserver.dto.UpdateProfileRequest request,
+            HttpServletRequest httpRequest) {
+        String token = httpRequest.getHeader("Authorization");
+        log.info("请求修改个人信息 email={}", request.getEmail());
+        return userService.updateProfile(token, request.getName(), request.getEmail(), request.getPassword());
+    }
+
+    @Operation(summary = "修改头像接口")
+    @PostMapping("/update-avatar")
+    public Map<String, Object> updateAvatar(
+            @RequestParam("file") org.springframework.web.multipart.MultipartFile file,
+            HttpServletRequest httpRequest) {
+        String token = httpRequest.getHeader("Authorization");
+        log.info("请求修改头像 fileName={}", file.getOriginalFilename());
+        return userService.updateAvatar(token, file);
+    }
+
+    @Operation(summary = "修改密码接口")
+    @PostMapping("/update-password")
+    public Map<String, Object> updatePassword(
+            @RequestBody com.bub6le.crackserver.dto.UpdatePasswordRequest request,
+            HttpServletRequest httpRequest) {
+        String token = httpRequest.getHeader("Authorization");
+        log.info("请求修改密码");
+        return userService.updatePassword(token, request.getOldPassword(), request.getNewPassword());
+    }
+
+    @Operation(summary = "获取当前用户信息接口")
+    @GetMapping("/info")
+    public Map<String, Object> getUserInfo(HttpServletRequest httpRequest) {
+        String token = httpRequest.getHeader("Authorization");
+        log.info("请求获取当前用户信息");
+        return userService.getUserInfo(token);
+    }
+
     @Operation(summary = "登出接口")
     @PostMapping("/logout")
     public Map<String, Object> logout(@RequestBody(required = false) Map<String, Object> body, HttpServletRequest request) {

@@ -15,6 +15,7 @@ public class User {
     private String email;
     private String password;
     private String name;
+    private String avatarUrl;
     private String roleId;
     private Integer status;
     private LocalDateTime lastLoginAt;
