@@ -31,5 +31,19 @@ public class ModelController {
     public Map<Long, List<Map<String, Object>>> detectBatch(@RequestBody DetectRequest request) {
         return modelService.detectBatch(request.getImageIds());
     }
+
+    @Operation(summary = "检测视频异常接口")
+    @PostMapping("/detectVideo/{videoId}")
+    public Map<String, Object> detectVideo(
+            @PathVariable("videoId") Long videoId,
+            jakarta.servlet.http.HttpServletRequest httpRequest) {
+        return modelService.detectVideo(videoId);
+    }
+
+    @Operation(summary = "获取视频检测进度")
+    @GetMapping("/detectVideo/progress/{videoId}")
+    public Map<String, Object> getDetectVideoProgress(@PathVariable("videoId") Long videoId) {
+        return modelService.getDetectVideoProgress(videoId);
+    }
 }
 

@@ -1,0 +1,1 @@
+ALTER TABLE `videos` ADD COLUMN `detectionResults` json DEFAULT NULL COMMENT '视频检测结果JSON' AFTER `isDetected`;

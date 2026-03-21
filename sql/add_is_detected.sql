@@ -1,0 +1,1 @@
+ALTER TABLE `videos` ADD COLUMN `isDetected` tinyint(1) NOT NULL DEFAULT '0' COMMENT '是否已检测 0-否 1-是' AFTER `status`;

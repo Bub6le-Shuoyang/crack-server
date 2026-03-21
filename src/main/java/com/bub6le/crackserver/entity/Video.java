@@ -20,6 +20,8 @@ public class Video {
     private Double duration;
     private String coverPath;
     private Integer status;
+    private Integer isDetected;
+    private String detectionResults;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

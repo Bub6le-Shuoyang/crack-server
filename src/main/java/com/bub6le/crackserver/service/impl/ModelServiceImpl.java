@@ -7,8 +7,10 @@ import ai.onnxruntime.OrtSession;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.bub6le.crackserver.entity.Image;
 import com.bub6le.crackserver.entity.ImageResult;
+import com.bub6le.crackserver.entity.Video;
 import com.bub6le.crackserver.mapper.ImageMapper;
 import com.bub6le.crackserver.mapper.ImageResultMapper;
+import com.bub6le.crackserver.mapper.VideoMapper;
 import com.bub6le.crackserver.service.ModelService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -27,7 +29,17 @@ import java.io.InputStream;
 import java.nio.FloatBuffer;
 import java.time.LocalDateTime;
 import java.util.*;
+import org.jcodec.api.FrameGrab;
+import org.jcodec.common.io.NIOUtils;
+import org.jcodec.common.model.Picture;
+import org.jcodec.scale.AWTUtil;
 import java.util.List;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Service
 @Slf4j
@@ -39,6 +51,12 @@ public class ModelServiceImpl implements ModelService {
     @Autowired
     private ImageResultMapper imageResultMapper;
 
+    @Autowired
+    private VideoMapper videoMapper;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
+
     private OrtEnvironment env;
     private OrtSession session;
     private static final int INPUT_SIZE = 640;
@@ -47,6 +65,12 @@ public class ModelServiceImpl implements ModelService {
     private static final String[] LABELS = {"P0", "P1", "P2", "P3"};
     private static final String MODEL_FILE_NAME = "best.onnx"; // Define constant for model filename
     private String modelName; // Store the full model name
+
+    // Store progress of video detection: videoId -> progress (0 to 100)
+    private final Map<Long, Integer> videoDetectionProgress = new ConcurrentHashMap<>();
+    // Store results of video detection: videoId -> result data map
+    private final Map<Long, Map<String, Object>> videoDetectionResults = new ConcurrentHashMap<>();
+    private final ExecutorService executorService = Executors.newFixedThreadPool(4);
 
     @PostConstruct
     public void init() {
@@ -72,6 +96,7 @@ public class ModelServiceImpl implements ModelService {
     @PreDestroy
     public void close() {
         try {
+            executorService.shutdown();
             if (session != null) session.close();
             if (env != null) env.close();
         } catch (OrtException e) {
@@ -217,10 +242,163 @@ public class ModelServiceImpl implements ModelService {
         return batchResults;
     }
 
-    private float[] preprocess(BufferedImage originalImage) {
+    @Override
+    public Map<String, Object> detectVideo(Long videoId) {
+        Map<String, Object> result = new HashMap<>();
+        if (session == null) {
+            result.put("error", true);
+            result.put("message", "模型未初始化");
+            return result;
+        }
+
+        Video video = videoMapper.selectById(videoId);
+        if (video == null) {
+            result.put("error", true);
+            result.put("message", "视频不存在");
+            return result;
+        }
+
+        String projectRoot = System.getProperty("user.dir");
+        String filePath = video.getFilePath();
+        File file = new File(projectRoot, filePath);
+        if (!file.exists()) {
+            result.put("error", true);
+            result.put("message", "视频文件丢失");
+            return result;
+        }
+
+        // Return immediately and start async processing
+        videoDetectionProgress.put(videoId, 0);
+        result.put("ok", true);
+        result.put("message", "已加入检测队列");
+
+        executorService.submit(() -> processVideoAsync(videoId, video, file));
+
+        return result;
+    }
+
+    private void processVideoAsync(Long videoId, Video video, File file) {
+        try {
+            int totalFramesProcessed = 0;
+            int anomalyCount = 0;
+            List<Map<String, Object>> anomalyFrames = new ArrayList<>();
+            
+            FrameGrab grab = FrameGrab.createFrameGrab(NIOUtils.readableChannel(file));
+            // estimate total frames
+            double duration = video.getDuration() != null ? video.getDuration() : grab.getVideoTrack().getMeta().getTotalDuration();
+            int fps = 30; // default assumption
+            int totalFrames = (int) (duration * fps);
+            
+            Picture picture;
+            int frameNumber = 0;
+            int sampleInterval = 15; 
+
+            while ((picture = grab.getNativeFrame()) != null) {
+                if (frameNumber % sampleInterval == 0) {
+                    BufferedImage bufferedImage = AWTUtil.toBufferedImage(picture);
+                    if (bufferedImage != null) {
+                        float[] floatData = preprocess(bufferedImage);
+                        OnnxTensor inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatData), new long[]{1, 3, INPUT_SIZE, INPUT_SIZE});
+                        OrtSession.Result inferResult = session.run(Collections.singletonMap(session.getInputNames().iterator().next(), inputTensor));
+                        float[][][] output = (float[][][]) inferResult.get(0).getValue();
+                        
+                        List<Map<String, Object>> detections = postprocess(output[0], bufferedImage.getWidth(), bufferedImage.getHeight());
+                        
+                        if (!detections.isEmpty()) {
+                            anomalyCount++;
+                            double timeInSeconds = frameNumber / (double) fps;
+                            Map<String, Object> frameData = new HashMap<>();
+                            frameData.put("time", timeInSeconds);
+                            
+                            int minutes = (int) (timeInSeconds / 60);
+                            int seconds = (int) (timeInSeconds % 60);
+                            int millis = (int) ((timeInSeconds - Math.floor(timeInSeconds)) * 1000);
+                            String timeFormatted = String.format("%02d:%02d.%03d", minutes, seconds, millis);
+                            
+                            frameData.put("timeFormatted", timeFormatted);
+                            frameData.put("frameNumber", frameNumber);
+                            frameData.put("detections", detections);
+                            
+                            anomalyFrames.add(frameData);
+                        }
+                        totalFramesProcessed++;
+                    }
+                }
+                frameNumber++;
+                
+                // Update progress
+                if (totalFrames > 0 && frameNumber % 10 == 0) {
+                    int progress = (int) ((frameNumber / (float) totalFrames) * 95);
+                    videoDetectionProgress.put(videoId, Math.min(progress, 95));
+                }
+            }
+            
+            // For now, we don't persist frame results to DB to keep it simple,
+            // we could serialize `anomalyFrames` to a JSON string and store in DB if needed.
+            // Just update status to done (1). In a real app, you'd store results.
+            
+            Map<String, Object> data = new HashMap<>();
+            data.put("videoId", videoId);
+            data.put("totalFramesProcessed", totalFramesProcessed);
+            data.put("anomalyCount", anomalyCount);
+            data.put("anomalyFrames", anomalyFrames);
+            
+            // Serialize to JSON and save to DB
+            String jsonResults = objectMapper.writeValueAsString(data);
+            video.setDetectionResults(jsonResults);
+            video.setIsDetected(1);
+            videoMapper.updateById(video);
+            
+            videoDetectionResults.put(videoId, data);
+            videoDetectionProgress.put(videoId, 100);
+
+        } catch (Exception e) {
+            log.error("Error processing video frames for videoId: " + videoId, e);
+            videoDetectionProgress.put(videoId, -1); // -1 indicates error
+        }
+    }
+
+    @Override
+    public Map<String, Object> getDetectVideoProgress(Long videoId) {
+        Map<String, Object> result = new HashMap<>();
+        Integer progress = videoDetectionProgress.getOrDefault(videoId, 0);
+        
+        result.put("ok", true);
+        result.put("progress", progress);
+        
+        if (progress == 100) {
+            result.put("message", "检测完成");
+            // Fetch results from memory cache first
+            Map<String, Object> data = videoDetectionResults.get(videoId);
+            if (data == null) {
+                // Fallback to DB
+                Video video = videoMapper.selectById(videoId);
+                if (video != null && video.getDetectionResults() != null) {
+                    try {
+                        data = objectMapper.readValue(video.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                        videoDetectionResults.put(videoId, data);
+                    } catch (Exception e) {
+                        log.error("Failed to parse detection results from DB for videoId: " + videoId, e);
+                    }
+                }
+            }
+            if (data != null) {
+                result.put("data", data);
+            }
+        } else if (progress == -1) {
+            result.put("error", true);
+            result.put("message", "检测失败");
+        } else {
+            result.put("message", "检测中...");
+        }
+        
+        return result;
+    }
+
+    private float[] preprocess(BufferedImage image) {
         BufferedImage resizedImage = new BufferedImage(INPUT_SIZE, INPUT_SIZE, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = resizedImage.createGraphics();
-        g.drawImage(originalImage, 0, 0, INPUT_SIZE, INPUT_SIZE, null);
+        g.drawImage(image, 0, 0, INPUT_SIZE, INPUT_SIZE, null);
         g.dispose();
 
         float[] data = new float[3 * INPUT_SIZE * INPUT_SIZE];

@@ -34,7 +34,7 @@ public class VideoController {
     @GetMapping("/list-videos")
     public Map<String, Object> listVideos(
             @RequestParam(value = "page", defaultValue = "1") int page,
-            @RequestParam(value = "pageSize", defaultValue = "10") int pageSize,
+            @RequestParam(value = "pageSize", defaultValue = "4") int pageSize,
             @RequestParam(value = "fileType", required = false) String fileType,
             @RequestHeader(value = "Authorization", required = false) String token) {
         log.info("请求获取视频列表 page={} pageSize={}", page, pageSize);

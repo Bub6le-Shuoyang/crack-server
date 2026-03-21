@@ -20,6 +20,14 @@ import java.io.File;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import org.jcodec.api.FrameGrab;
+import org.jcodec.common.io.NIOUtils;
+import org.jcodec.common.model.Picture;
+import org.jcodec.scale.AWTUtil;
 
 @Service
 @Slf4j
@@ -30,6 +38,9 @@ public class VideoServiceImpl implements VideoService {
 
     @Autowired
     private UserTokenMapper userTokenMapper;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private final String UPLOAD_ROOT = System.getProperty("user.dir") + File.separator + "uploads" + File.separator;
 
@@ -63,7 +74,7 @@ public class VideoServiceImpl implements VideoService {
             return result;
         }
 
-        // Check file size (100MB)
+        // Check file size (100MB per file)
         if (file.getSize() > 100 * 1024 * 1024) {
             result.put("error", true);
             result.put("message", "视频大小不能超过100MB");
@@ -81,6 +92,16 @@ public class VideoServiceImpl implements VideoService {
             return result;
         }
 
+        // Check total upload size limit (1GB)
+        Long totalSize = videoMapper.selectList(new LambdaQueryWrapper<Video>().eq(Video::getUserId, userId).eq(Video::getStatus, 1))
+                .stream().mapToLong(Video::getFileSize).sum();
+        if (totalSize + file.getSize() > 1024L * 1024L * 1024L) {
+            result.put("error", true);
+            result.put("message", "用户总上传视频大小不能超过1GB");
+            result.put("code", "TOTAL_SIZE_EXCEEDED");
+            return result;
+        }
+
         try {
             String dateDir = DateUtil.format(new Date(), "yyyyMMdd");
             String newFileName = IdUtil.simpleUUID() + "." + ext;
@@ -91,12 +112,38 @@ public class VideoServiceImpl implements VideoService {
             FileUtil.touch(dest);
             file.transferTo(dest);
 
-            // Handle cover generation (Mock implementation)
+            double duration = 0.0;
             String coverPath = null;
-            if (Boolean.TRUE.equals(generateCover)) {
-                // TODO: Implement real video cover generation using ffmpeg or similar
-                // For now, we skip it or use a default if available
-                // coverPath = "/uploads/videos/cover/" + dateDir + "/" + IdUtil.simpleUUID() + ".jpg";
+            
+            try {
+                // Get duration and first frame using jcodec
+                FrameGrab grab = FrameGrab.createFrameGrab(NIOUtils.readableChannel(dest));
+                duration = grab.getVideoTrack().getMeta().getTotalDuration();
+                
+                // if (duration > 180.0) {
+                //     FileUtil.del(dest);
+                //     result.put("error", true);
+                //     result.put("message", "视频时长不能超过3分钟");
+                //     result.put("code", "DURATION_EXCEEDED");
+                //     return result;
+                // }
+
+                if (Boolean.TRUE.equals(generateCover)) {
+                    grab.seekToSecondPrecise(0);
+                    Picture picture = grab.getNativeFrame();
+                    if (picture != null) {
+                        BufferedImage bufferedImage = AWTUtil.toBufferedImage(picture);
+                        String coverFileName = IdUtil.simpleUUID() + ".jpg";
+                        String coverRelPath = "/uploads/videos/cover/" + dateDir + "/" + coverFileName;
+                        String coverAbsPath = UPLOAD_ROOT + "videos" + File.separator + "cover" + File.separator + dateDir + File.separator + coverFileName;
+                        File coverFile = new File(coverAbsPath);
+                        FileUtil.touch(coverFile);
+                        ImageIO.write(bufferedImage, "jpg", coverFile);
+                        coverPath = coverRelPath;
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to parse video duration or generate cover for file: " + absolutePath, e);
             }
 
             Video video = new Video();
@@ -105,9 +152,10 @@ public class VideoServiceImpl implements VideoService {
             video.setFilePath(relativePath);
             video.setFileSize(file.getSize());
             video.setFileType(ext);
-            video.setDuration(0.0); // Placeholder
+            video.setDuration(duration); // Store actual duration
             video.setCoverPath(coverPath);
             video.setStatus(1);
+            video.setIsDetected(0);
             video.setCreatedAt(LocalDateTime.now());
             video.setUpdatedAt(LocalDateTime.now());
             videoMapper.insert(video);
@@ -122,6 +170,7 @@ public class VideoServiceImpl implements VideoService {
             data.put("fileType", video.getFileType());
             data.put("duration", video.getDuration());
             data.put("coverPath", video.getCoverPath());
+            data.put("isDetected", video.getIsDetected());
             result.put("data", data);
 
         } catch (IOException e) {
@@ -157,9 +206,37 @@ public class VideoServiceImpl implements VideoService {
 
         Page<Video> videoPage = videoMapper.selectPage(p, wrapper);
 
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Video video : videoPage.getRecords()) {
+            Map<String, Object> map = new HashMap<>();
+            map.put("id", video.getId());
+            map.put("videoId", video.getId());
+            map.put("userId", video.getUserId());
+            map.put("fileName", video.getFileName());
+            map.put("filePath", video.getFilePath());
+            map.put("fileSize", video.getFileSize());
+            map.put("fileType", video.getFileType());
+            map.put("duration", video.getDuration());
+            map.put("coverPath", video.getCoverPath());
+            map.put("status", video.getStatus());
+            map.put("isDetected", video.getIsDetected());
+            map.put("createdAt", DateUtil.formatDateTime(DateUtil.date(java.sql.Timestamp.valueOf(video.getCreatedAt()))));
+            
+            if (video.getIsDetected() != null && video.getIsDetected() == 1 && video.getDetectionResults() != null) {
+                try {
+                    Map<String, Object> detectionData = objectMapper.readValue(video.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                    map.put("anomalyCount", detectionData.get("anomalyCount"));
+                    map.put("anomalyFrames", detectionData.get("anomalyFrames"));
+                } catch (Exception e) {
+                    log.warn("Failed to parse detection results for video id: " + video.getId(), e);
+                }
+            }
+            list.add(map);
+        }
+
         result.put("ok", true);
         Map<String, Object> data = new HashMap<>();
-        data.put("list", videoPage.getRecords());
+        data.put("list", list);
         data.put("total", videoPage.getTotal());
         data.put("page", videoPage.getCurrent());
         data.put("pageSize", videoPage.getSize());

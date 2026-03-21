@@ -18,4 +18,18 @@ public interface ModelService {
      * @return 检测结果列表
      */
     Map<Long, List<Map<String, Object>>> detectBatch(List<Long> imageIds);
+
+    /**
+     * 检测视频中的异常
+     * @param videoId 视频ID
+     * @return 检测结果
+     */
+    Map<String, Object> detectVideo(Long videoId);
+
+    /**
+     * 获取视频检测进度
+     * @param videoId 视频ID
+     * @return 进度信息
+     */
+    Map<String, Object> getDetectVideoProgress(Long videoId);
 }
