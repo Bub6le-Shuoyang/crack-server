@@ -43,4 +43,9 @@ public interface StatisticsService {
      * 异常热点时段分析
      */
     Map<String, Object> getAnomalyTimeAnalysis(String token);
+
+    /**
+     * 原始检测数据
+     */
+    Map<String, Object> getRawDetectionData(String token);
 }

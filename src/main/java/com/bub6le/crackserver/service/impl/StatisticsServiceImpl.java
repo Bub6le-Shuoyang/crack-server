@@ -634,9 +634,15 @@ public class StatisticsServiceImpl implements StatisticsService {
         List<Long> myImageIds = myImages.stream().map(Image::getId).collect(Collectors.toList());
         long detectedImages = 0;
         if (!myImageIds.isEmpty()) {
-            detectedImages = imageResultMapper.selectCount(new LambdaQueryWrapper<ImageResult>()
+            // 使用 Set 去重统计有检测结果的图片ID
+            List<ImageResult> imageResults = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
                     .in(ImageResult::getImageId, myImageIds)
-                    .groupBy(ImageResult::getImageId));
+                    .select(ImageResult::getImageId));
+            Set<Long> detectedImageIdSet = new HashSet<>();
+            for (ImageResult ir : imageResults) {
+                detectedImageIdSet.add(ir.getImageId());
+            }
+            detectedImages = detectedImageIdSet.size();
         }
         long detectedVideos = myVideos.stream().filter(v -> v.getIsDetected() != null && v.getIsDetected() == 1).count();
         data.put("totalDetections", detectedImages + detectedVideos);
@@ -1177,6 +1183,129 @@ public class StatisticsServiceImpl implements StatisticsService {
             weekdayDistribution.add(dayData);
         }
         data.put("weekdayDistribution", weekdayDistribution);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 7. 原始检测数据
+     */
+    @Override
+    public Map<String, Object> getRawDetectionData(String token) {
+        User user = getUserByToken(token);
+        if (user == null) {
+            return error("Token无效或已过期");
+        }
+
+        boolean isAdmin = "admin".equals(user.getRoleId());
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 最近10条图片检测结果
+        LambdaQueryWrapper<Image> imgWrapper = new LambdaQueryWrapper<Image>()
+                .eq(Image::getStatus, 1)
+                .orderByDesc(Image::getCreatedAt)
+                .last("LIMIT 10");
+        if (!isAdmin) {
+            imgWrapper.eq(Image::getUserId, user.getId());
+        }
+        List<Image> recentImages = imageMapper.selectList(imgWrapper);
+
+        List<Map<String, Object>> recentImageDetections = new ArrayList<>();
+        for (Image img : recentImages) {
+            Map<String, Object> imgData = new HashMap<>();
+            imgData.put("id", img.getId());
+            imgData.put("fileName", img.getFileName());
+            imgData.put("fileSize", img.getFileSize());
+            imgData.put("fileSizeFormatted", formatFileSize(img.getFileSize() != null ? img.getFileSize() : 0L));
+            imgData.put("createdAt", img.getCreatedAt() != null ? img.getCreatedAt().toString() : null);
+
+            // 获取上传用户信息
+            User uploader = userMapper.selectById(img.getUserId());
+            imgData.put("uploaderId", img.getUserId());
+            imgData.put("uploaderName", uploader != null ? (uploader.getName() != null ? uploader.getName() : uploader.getEmail()) : "未知");
+
+            // 获取检测结果
+            List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
+                    .eq(ImageResult::getImageId, img.getId()));
+            if (!results.isEmpty()) {
+                imgData.put("isDetected", true);
+                imgData.put("detectionCount", results.size());
+                // 异常数量
+                long anomalyCount = results.stream().filter(r -> !"NORMAL".equals(r.getLabel())).count();
+                imgData.put("anomalyCount", anomalyCount);
+                // 最高置信度异常
+                ImageResult topResult = results.stream()
+                        .filter(r -> !"NORMAL".equals(r.getLabel()))
+                        .max((a, b) -> Float.compare(a.getScore(), b.getScore()))
+                        .orElse(null);
+                if (topResult != null) {
+                    imgData.put("topAnomalyLabel", topResult.getLabel());
+                    imgData.put("topAnomalyScore", topResult.getScore());
+                } else {
+                    imgData.put("topAnomalyLabel", "NORMAL");
+                    imgData.put("topAnomalyScore", results.get(0).getScore());
+                }
+            } else {
+                imgData.put("isDetected", false);
+                imgData.put("detectionCount", 0);
+                imgData.put("anomalyCount", 0);
+            }
+            recentImageDetections.add(imgData);
+        }
+        data.put("recentImageDetections", recentImageDetections);
+
+        // 最近3条视频检测结果
+        LambdaQueryWrapper<Video> vidWrapper = new LambdaQueryWrapper<Video>()
+                .eq(Video::getStatus, 1)
+                .orderByDesc(Video::getCreatedAt)
+                .last("LIMIT 3");
+        if (!isAdmin) {
+            vidWrapper.eq(Video::getUserId, user.getId());
+        }
+        List<Video> recentVideos = videoMapper.selectList(vidWrapper);
+
+        List<Map<String, Object>> recentVideoDetections = new ArrayList<>();
+        for (Video vid : recentVideos) {
+            Map<String, Object> vidData = new HashMap<>();
+            vidData.put("id", vid.getId());
+            vidData.put("fileName", vid.getFileName());
+            vidData.put("fileSize", vid.getFileSize());
+            vidData.put("fileSizeFormatted", formatFileSize(vid.getFileSize() != null ? vid.getFileSize() : 0L));
+            vidData.put("duration", vid.getDuration());
+            vidData.put("createdAt", vid.getCreatedAt() != null ? vid.getCreatedAt().toString() : null);
+
+            // 获取上传用户信息
+            User uploader = userMapper.selectById(vid.getUserId());
+            vidData.put("uploaderId", vid.getUserId());
+            vidData.put("uploaderName", uploader != null ? (uploader.getName() != null ? uploader.getName() : uploader.getEmail()) : "未知");
+
+            // 获取检测结果
+            if (vid.getIsDetected() != null && vid.getIsDetected() == 1 && vid.getDetectionResults() != null) {
+                vidData.put("isDetected", true);
+                try {
+                    Map<String, Object> det = objectMapper.readValue(vid.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                    int anomalyCount = (int) det.getOrDefault("anomalyCount", 0);
+                    int totalFrames = (int) det.getOrDefault("totalFramesProcessed", 0);
+                    vidData.put("anomalyCount", anomalyCount);
+                    vidData.put("totalFrames", totalFrames);
+                    vidData.put("anomalyRate", totalFrames > 0 ? (double) anomalyCount / totalFrames : 0.0);
+                } catch (Exception e) {
+                    vidData.put("anomalyCount", 0);
+                    vidData.put("totalFrames", 0);
+                    vidData.put("anomalyRate", 0.0);
+                }
+            } else {
+                vidData.put("isDetected", false);
+                vidData.put("anomalyCount", 0);
+                vidData.put("totalFrames", 0);
+                vidData.put("anomalyRate", 0.0);
+            }
+            recentVideoDetections.add(vidData);
+        }
+        data.put("recentVideoDetections", recentVideoDetections);
 
         result.put("ok", true);
         result.put("data", data);

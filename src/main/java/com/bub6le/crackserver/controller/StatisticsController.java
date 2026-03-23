@@ -107,4 +107,12 @@ public class StatisticsController {
         log.info("请求异常热点时段分析");
         return statisticsService.getAnomalyTimeAnalysis(token);
     }
+
+    @Operation(summary = "原始检测数据", description = "获取最近的检测原始数据：最近10条图片检测结果、最近3条视频检测结果")
+    @GetMapping("/raw-data")
+    public Map<String, Object> getRawDetectionData(
+            @RequestHeader(value = "Authorization", required = false) String token) {
+        log.info("请求原始检测数据");
+        return statisticsService.getRawDetectionData(token);
+    }
 }
