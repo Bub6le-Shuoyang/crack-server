@@ -477,4 +477,780 @@ public class StatisticsServiceImpl implements StatisticsService {
         map.put("message", message);
         return map;
     }
+
+    // ========== 新增的6个统计接口实现 ==========
+
+    /**
+     * 1. 存储空间统计
+     */
+    @Override
+    public Map<String, Object> getStorageStats(String token) {
+        User user = getUserByToken(token);
+        if (user == null) {
+            return error("Token无效或已过期");
+        }
+
+        boolean isAdmin = "admin".equals(user.getRoleId());
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 获取所有图片
+        LambdaQueryWrapper<Image> imgWrapper = new LambdaQueryWrapper<Image>().eq(Image::getStatus, 1);
+        if (!isAdmin) {
+            imgWrapper.eq(Image::getUserId, user.getId());
+        }
+        List<Image> images = imageMapper.selectList(imgWrapper);
+
+        // 获取所有视频
+        LambdaQueryWrapper<Video> vidWrapper = new LambdaQueryWrapper<Video>().eq(Video::getStatus, 1);
+        if (!isAdmin) {
+            vidWrapper.eq(Video::getUserId, user.getId());
+        }
+        List<Video> videos = videoMapper.selectList(vidWrapper);
+
+        // 计算总存储
+        long imageStorage = images.stream().mapToLong(img -> img.getFileSize() != null ? img.getFileSize() : 0L).sum();
+        long videoStorage = videos.stream().mapToLong(vid -> vid.getFileSize() != null ? vid.getFileSize() : 0L).sum();
+        long totalStorage = imageStorage + videoStorage;
+
+        data.put("totalStorage", totalStorage);
+        data.put("totalStorageFormatted", formatFileSize(totalStorage));
+        data.put("imageStorage", imageStorage);
+        data.put("imageStorageFormatted", formatFileSize(imageStorage));
+        data.put("videoStorage", videoStorage);
+        data.put("videoStorageFormatted", formatFileSize(videoStorage));
+        data.put("imageCount", images.size());
+        data.put("videoCount", videos.size());
+
+        // 存储占比
+        if (totalStorage > 0) {
+            data.put("imageStoragePercent", (imageStorage * 100.0 / totalStorage));
+            data.put("videoStoragePercent", (videoStorage * 100.0 / totalStorage));
+        } else {
+            data.put("imageStoragePercent", 0.0);
+            data.put("videoStoragePercent", 0.0);
+        }
+
+        // 管理员视角：各用户存储排名 Top 10
+        if (isAdmin) {
+            Map<Long, Long> userStorageMap = new HashMap<>();
+            for (Image img : images) {
+                userStorageMap.merge(img.getUserId(), img.getFileSize() != null ? img.getFileSize() : 0L, Long::sum);
+            }
+            for (Video vid : videos) {
+                userStorageMap.merge(vid.getUserId(), vid.getFileSize() != null ? vid.getFileSize() : 0L, Long::sum);
+            }
+
+            List<Map<String, Object>> storageByUser = new ArrayList<>();
+            userStorageMap.entrySet().stream()
+                    .sorted(Map.Entry.<Long, Long>comparingByValue().reversed())
+                    .limit(10)
+                    .forEach(entry -> {
+                        User u = userMapper.selectById(entry.getKey());
+                        if (u != null) {
+                            Map<String, Object> userData = new HashMap<>();
+                            userData.put("userId", u.getId());
+                            userData.put("userName", u.getName() != null ? u.getName() : u.getEmail());
+                            userData.put("storage", entry.getValue());
+                            userData.put("storageFormatted", formatFileSize(entry.getValue()));
+                            userData.put("percentage", totalStorage > 0 ? (entry.getValue() * 100.0 / totalStorage) : 0.0);
+                            storageByUser.add(userData);
+                        }
+                    });
+            data.put("storageByUser", storageByUser);
+        }
+
+        // 近30天存储增长趋势
+        List<Map<String, Object>> storageTrend = new ArrayList<>();
+        LocalDate today = LocalDate.now();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        
+        // 按日期统计上传的文件大小
+        Map<LocalDate, Long> dailyStorage = new HashMap<>();
+        for (Image img : images) {
+            if (img.getCreatedAt() != null) {
+                LocalDate date = img.getCreatedAt().toLocalDate();
+                dailyStorage.merge(date, img.getFileSize() != null ? img.getFileSize() : 0L, Long::sum);
+            }
+        }
+        for (Video vid : videos) {
+            if (vid.getCreatedAt() != null) {
+                LocalDate date = vid.getCreatedAt().toLocalDate();
+                dailyStorage.merge(date, vid.getFileSize() != null ? vid.getFileSize() : 0L, Long::sum);
+            }
+        }
+
+        // 累计存储
+        long cumulativeStorage = 0;
+        for (int i = 29; i >= 0; i--) {
+            LocalDate date = today.minusDays(i);
+            cumulativeStorage += dailyStorage.getOrDefault(date, 0L);
+            Map<String, Object> dayData = new HashMap<>();
+            dayData.put("date", date.format(formatter));
+            dayData.put("total", cumulativeStorage);
+            dayData.put("dailyNew", dailyStorage.getOrDefault(date, 0L));
+            storageTrend.add(dayData);
+        }
+        data.put("storageTrend", storageTrend);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 2. 用户个人统计
+     */
+    @Override
+    public Map<String, Object> getPersonalStats(String token) {
+        Long userId = getUserIdByToken(token);
+        if (userId == null) {
+            return error("Token无效或已过期");
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 图片统计
+        List<Image> myImages = imageMapper.selectList(new LambdaQueryWrapper<Image>()
+                .eq(Image::getUserId, userId)
+                .eq(Image::getStatus, 1));
+        data.put("totalImages", myImages.size());
+
+        // 视频统计
+        List<Video> myVideos = videoMapper.selectList(new LambdaQueryWrapper<Video>()
+                .eq(Video::getUserId, userId)
+                .eq(Video::getStatus, 1));
+        data.put("totalVideos", myVideos.size());
+
+        // 存储占用
+        long imageStorage = myImages.stream().mapToLong(img -> img.getFileSize() != null ? img.getFileSize() : 0L).sum();
+        long videoStorage = myVideos.stream().mapToLong(vid -> vid.getFileSize() != null ? vid.getFileSize() : 0L).sum();
+        long totalStorage = imageStorage + videoStorage;
+        data.put("totalStorage", totalStorage);
+        data.put("totalStorageFormatted", formatFileSize(totalStorage));
+
+        // 检测量统计
+        List<Long> myImageIds = myImages.stream().map(Image::getId).collect(Collectors.toList());
+        long detectedImages = 0;
+        if (!myImageIds.isEmpty()) {
+            detectedImages = imageResultMapper.selectCount(new LambdaQueryWrapper<ImageResult>()
+                    .in(ImageResult::getImageId, myImageIds)
+                    .groupBy(ImageResult::getImageId));
+        }
+        long detectedVideos = myVideos.stream().filter(v -> v.getIsDetected() != null && v.getIsDetected() == 1).count();
+        data.put("totalDetections", detectedImages + detectedVideos);
+        data.put("detectedImages", detectedImages);
+        data.put("detectedVideos", detectedVideos);
+
+        // 异常统计
+        Set<Long> anomalyImageIds = new HashSet<>();
+        if (!myImageIds.isEmpty()) {
+            List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
+                    .in(ImageResult::getImageId, myImageIds)
+                    .ne(ImageResult::getLabel, "NORMAL"));
+            for (ImageResult ir : results) {
+                anomalyImageIds.add(ir.getImageId());
+            }
+        }
+
+        long anomalyVideos = 0;
+        for (Video v : myVideos) {
+            if (v.getIsDetected() != null && v.getIsDetected() == 1 && v.getDetectionResults() != null) {
+                try {
+                    Map<String, Object> det = objectMapper.readValue(v.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                    int ac = (int) det.getOrDefault("anomalyCount", 0);
+                    if (ac > 0) anomalyVideos++;
+                } catch (Exception e) {}
+            }
+        }
+
+        data.put("anomalyCount", anomalyImageIds.size() + (int) anomalyVideos);
+        data.put("anomalyImages", anomalyImageIds.size());
+        data.put("anomalyVideos", anomalyVideos);
+
+        // 异常率
+        long totalDetected = detectedImages + detectedVideos;
+        long totalAnomaly = anomalyImageIds.size() + anomalyVideos;
+        data.put("anomalyRate", totalDetected > 0 ? (double) totalAnomaly / totalDetected : 0.0);
+
+        // 近7天活动
+        List<Map<String, Object>> recentActivity = new ArrayList<>();
+        LocalDate today = LocalDate.now();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+        Map<LocalDate, Integer> dailyUploads = new HashMap<>();
+        Map<LocalDate, Integer> dailyDetections = new HashMap<>();
+
+        for (Image img : myImages) {
+            if (img.getCreatedAt() != null) {
+                LocalDate date = img.getCreatedAt().toLocalDate();
+                dailyUploads.merge(date, 1, Integer::sum);
+            }
+        }
+        for (Video vid : myVideos) {
+            if (vid.getCreatedAt() != null) {
+                LocalDate date = vid.getCreatedAt().toLocalDate();
+                dailyUploads.merge(date, 1, Integer::sum);
+            }
+        }
+
+        for (int i = 6; i >= 0; i--) {
+            LocalDate date = today.minusDays(i);
+            Map<String, Object> dayData = new HashMap<>();
+            dayData.put("date", date.format(formatter));
+            dayData.put("uploads", dailyUploads.getOrDefault(date, 0));
+            dayData.put("detections", dailyDetections.getOrDefault(date, 0));
+            recentActivity.add(dayData);
+        }
+        data.put("recentActivity", recentActivity);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 3. 视频检测概览
+     */
+    @Override
+    public Map<String, Object> getVideoOverview(String token) {
+        User user = getUserByToken(token);
+        if (user == null) {
+            return error("Token无效或已过期");
+        }
+
+        boolean isAdmin = "admin".equals(user.getRoleId());
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 获取视频列表
+        LambdaQueryWrapper<Video> wrapper = new LambdaQueryWrapper<Video>().eq(Video::getStatus, 1);
+        if (!isAdmin) {
+            wrapper.eq(Video::getUserId, user.getId());
+        }
+        List<Video> videos = videoMapper.selectList(wrapper);
+
+        long totalVideos = videos.size();
+        data.put("totalVideos", totalVideos);
+
+        if (totalVideos == 0) {
+            data.put("totalDuration", 0.0);
+            data.put("totalDurationFormatted", "0:00");
+            data.put("detectedVideos", 0);
+            data.put("anomalyVideos", 0);
+            data.put("anomalyVideoRate", 0.0);
+            data.put("avgAnomalyTimeRatio", 0.0);
+            data.put("topAnomalyTypes", new ArrayList<>());
+            data.put("dailyTrend", new ArrayList<>());
+            result.put("ok", true);
+            result.put("data", data);
+            return result;
+        }
+
+        // 总时长
+        double totalDuration = videos.stream()
+                .mapToDouble(v -> v.getDuration() != null ? v.getDuration() : 0.0)
+                .sum();
+        data.put("totalDuration", totalDuration);
+        data.put("totalDurationFormatted", formatDuration(totalDuration));
+
+        // 已检测视频数
+        long detectedVideos = videos.stream()
+                .filter(v -> v.getIsDetected() != null && v.getIsDetected() == 1)
+                .count();
+        data.put("detectedVideos", detectedVideos);
+
+        // 异常视频统计
+        Map<String, Integer> anomalyTypeCount = new HashMap<>();
+        long anomalyVideos = 0;
+        double totalAnomalyTimeRatio = 0.0;
+
+        for (Video v : videos) {
+            if (v.getIsDetected() != null && v.getIsDetected() == 1 && v.getDetectionResults() != null) {
+                try {
+                    Map<String, Object> det = objectMapper.readValue(v.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                    int anomalyCount = (int) det.getOrDefault("anomalyCount", 0);
+                    if (anomalyCount > 0) {
+                        anomalyVideos++;
+                        int totalFrames = (int) det.getOrDefault("totalFramesProcessed", 1);
+                        totalAnomalyTimeRatio += (double) anomalyCount / totalFrames;
+                    }
+
+                    // 统计异常类型
+                    List<Map<String, Object>> frames = (List<Map<String, Object>>) det.getOrDefault("anomalyFrames", new ArrayList<>());
+                    for (Map<String, Object> frame : frames) {
+                        List<Map<String, Object>> detections = (List<Map<String, Object>>) frame.get("detections");
+                        if (detections != null) {
+                            for (Map<String, Object> d : detections) {
+                                String label = (String) d.get("label");
+                                anomalyTypeCount.merge(label, 1, Integer::sum);
+                            }
+                        }
+                    }
+                } catch (Exception e) {}
+            }
+        }
+
+        data.put("anomalyVideos", anomalyVideos);
+        data.put("anomalyVideoRate", detectedVideos > 0 ? (double) anomalyVideos / detectedVideos : 0.0);
+        data.put("avgAnomalyTimeRatio", detectedVideos > 0 ? totalAnomalyTimeRatio / detectedVideos : 0.0);
+
+        // Top 异常类型
+        int totalAnomalies = anomalyTypeCount.values().stream().mapToInt(Integer::intValue).sum();
+        List<Map<String, Object>> topAnomalyTypes = new ArrayList<>();
+        anomalyTypeCount.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .forEach(entry -> {
+                    Map<String, Object> typeData = new HashMap<>();
+                    typeData.put("label", entry.getKey());
+                    typeData.put("count", entry.getValue());
+                    typeData.put("percentage", totalAnomalies > 0 ? (entry.getValue() * 100.0 / totalAnomalies) : 0.0);
+                    topAnomalyTypes.add(typeData);
+                });
+        data.put("topAnomalyTypes", topAnomalyTypes);
+
+        // 近7天检测趋势
+        List<Map<String, Object>> dailyTrend = new ArrayList<>();
+        LocalDate today = LocalDate.now();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+        Map<LocalDate, Integer> dailyDetect = new HashMap<>();
+        Map<LocalDate, Integer> dailyAnomaly = new HashMap<>();
+
+        for (Video v : videos) {
+            if (v.getCreatedAt() != null) {
+                LocalDate date = v.getCreatedAt().toLocalDate();
+                if (v.getIsDetected() != null && v.getIsDetected() == 1) {
+                    dailyDetect.merge(date, 1, Integer::sum);
+                    // 检查是否异常
+                    if (v.getDetectionResults() != null) {
+                        try {
+                            Map<String, Object> det = objectMapper.readValue(v.getDetectionResults(), new TypeReference<Map<String, Object>>() {});
+                            int ac = (int) det.getOrDefault("anomalyCount", 0);
+                            if (ac > 0) {
+                                dailyAnomaly.merge(date, 1, Integer::sum);
+                            }
+                        } catch (Exception e) {}
+                    }
+                }
+            }
+        }
+
+        for (int i = 6; i >= 0; i--) {
+            LocalDate date = today.minusDays(i);
+            Map<String, Object> dayData = new HashMap<>();
+            dayData.put("date", date.format(formatter));
+            dayData.put("total", dailyDetect.getOrDefault(date, 0));
+            dayData.put("anomaly", dailyAnomaly.getOrDefault(date, 0));
+            dailyTrend.add(dayData);
+        }
+        data.put("dailyTrend", dailyTrend);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 4. 文件类型分布
+     */
+    @Override
+    public Map<String, Object> getFileTypeDistribution(String token) {
+        User user = getUserByToken(token);
+        if (user == null) {
+            return error("Token无效或已过期");
+        }
+
+        boolean isAdmin = "admin".equals(user.getRoleId());
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 图片类型统计
+        LambdaQueryWrapper<Image> imgWrapper = new LambdaQueryWrapper<Image>().eq(Image::getStatus, 1);
+        if (!isAdmin) {
+            imgWrapper.eq(Image::getUserId, user.getId());
+        }
+        List<Image> images = imageMapper.selectList(imgWrapper);
+
+        Map<String, Integer> imageTypeCount = new HashMap<>();
+        Map<String, Long> imageTypeSize = new HashMap<>();
+        for (Image img : images) {
+            String fileType = normalizeFileType(img.getFileType());
+            imageTypeCount.merge(fileType, 1, Integer::sum);
+            imageTypeSize.merge(fileType, img.getFileSize() != null ? img.getFileSize() : 0L, Long::sum);
+        }
+
+        int totalImages = images.size();
+        long totalImageSize = imageTypeSize.values().stream().mapToLong(Long::longValue).sum();
+
+        List<Map<String, Object>> imageTypeDistribution = new ArrayList<>();
+        imageTypeCount.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .forEach(entry -> {
+                    Map<String, Object> typeData = new HashMap<>();
+                    typeData.put("type", entry.getKey());
+                    typeData.put("count", entry.getValue());
+                    typeData.put("percentage", totalImages > 0 ? (entry.getValue() * 100.0 / totalImages) : 0.0);
+                    typeData.put("totalSize", imageTypeSize.getOrDefault(entry.getKey(), 0L));
+                    typeData.put("totalSizeFormatted", formatFileSize(imageTypeSize.getOrDefault(entry.getKey(), 0L)));
+                    imageTypeDistribution.add(typeData);
+                });
+        data.put("imageTypes", imageTypeDistribution);
+        data.put("totalImages", totalImages);
+        data.put("totalImageSize", totalImageSize);
+        data.put("totalImageSizeFormatted", formatFileSize(totalImageSize));
+
+        // 视频类型统计
+        LambdaQueryWrapper<Video> vidWrapper = new LambdaQueryWrapper<Video>().eq(Video::getStatus, 1);
+        if (!isAdmin) {
+            vidWrapper.eq(Video::getUserId, user.getId());
+        }
+        List<Video> videos = videoMapper.selectList(vidWrapper);
+
+        Map<String, Integer> videoTypeCount = new HashMap<>();
+        Map<String, Long> videoTypeSize = new HashMap<>();
+        for (Video vid : videos) {
+            String fileType = normalizeFileType(vid.getFileType());
+            videoTypeCount.merge(fileType, 1, Integer::sum);
+            videoTypeSize.merge(fileType, vid.getFileSize() != null ? vid.getFileSize() : 0L, Long::sum);
+        }
+
+        int totalVideos = videos.size();
+        long totalVideoSize = videoTypeSize.values().stream().mapToLong(Long::longValue).sum();
+
+        List<Map<String, Object>> videoTypeDistribution = new ArrayList<>();
+        videoTypeCount.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .forEach(entry -> {
+                    Map<String, Object> typeData = new HashMap<>();
+                    typeData.put("type", entry.getKey());
+                    typeData.put("count", entry.getValue());
+                    typeData.put("percentage", totalVideos > 0 ? (entry.getValue() * 100.0 / totalVideos) : 0.0);
+                    typeData.put("totalSize", videoTypeSize.getOrDefault(entry.getKey(), 0L));
+                    typeData.put("totalSizeFormatted", formatFileSize(videoTypeSize.getOrDefault(entry.getKey(), 0L)));
+                    videoTypeDistribution.add(typeData);
+                });
+        data.put("videoTypes", videoTypeDistribution);
+        data.put("totalVideos", totalVideos);
+        data.put("totalVideoSize", totalVideoSize);
+        data.put("totalVideoSizeFormatted", formatFileSize(totalVideoSize));
+
+        // 总计
+        data.put("totalFiles", totalImages + totalVideos);
+        data.put("totalStorage", totalImageSize + totalVideoSize);
+        data.put("totalStorageFormatted", formatFileSize(totalImageSize + totalVideoSize));
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 5. 实时监控面板
+     */
+    @Override
+    public Map<String, Object> getRealtimeDashboard(String token) {
+        User user = getUserByToken(token);
+        if (user == null || !"admin".equals(user.getRoleId())) {
+            return error("无管理员权限");
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        LocalDateTime todayStart = LocalDate.now().atStartOfDay();
+        LocalDateTime now = LocalDateTime.now();
+
+        // 今日新增用户
+        long newUsersToday = userMapper.selectCount(new LambdaQueryWrapper<User>()
+                .eq(User::getStatus, 1)
+                .ge(User::getCreatedAt, todayStart));
+        data.put("newUsersToday", newUsersToday);
+
+        // 今日活跃用户（今日有登录记录）
+        long activeUsersToday = userMapper.selectCount(new LambdaQueryWrapper<User>()
+                .eq(User::getStatus, 1)
+                .ge(User::getLastLoginAt, todayStart));
+        data.put("activeUsersToday", activeUsersToday);
+
+        // 今日上传图片数
+        long imagesUploadedToday = imageMapper.selectCount(new LambdaQueryWrapper<Image>()
+                .eq(Image::getStatus, 1)
+                .ge(Image::getCreatedAt, todayStart));
+        data.put("imagesUploadedToday", imagesUploadedToday);
+
+        // 今日上传视频数
+        long videosUploadedToday = videoMapper.selectCount(new LambdaQueryWrapper<Video>()
+                .eq(Video::getStatus, 1)
+                .ge(Video::getCreatedAt, todayStart));
+        data.put("videosUploadedToday", videosUploadedToday);
+
+        // 今日检测图片数
+        long imagesDetectedToday = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
+                .ge(ImageResult::getCreatedAt, todayStart))
+                .stream()
+                .map(ImageResult::getImageId)
+                .distinct()
+                .count();
+        data.put("imagesDetectedToday", imagesDetectedToday);
+
+        // 今日检测视频数
+        long videosDetectedToday = videoMapper.selectCount(new LambdaQueryWrapper<Video>()
+                .eq(Video::getIsDetected, 1)
+                .ge(Video::getUpdatedAt, todayStart));
+        data.put("videosDetectedToday", videosDetectedToday);
+
+        // 今日发现异常数
+        long anomaliesToday = imageResultMapper.selectCount(new LambdaQueryWrapper<ImageResult>()
+                .ne(ImageResult::getLabel, "NORMAL")
+                .ge(ImageResult::getCreatedAt, todayStart));
+        data.put("anomaliesToday", anomaliesToday);
+
+        // 今日存储增量
+        long storageIncreaseToday = 0;
+        List<Image> todayImages = imageMapper.selectList(new LambdaQueryWrapper<Image>()
+                .eq(Image::getStatus, 1)
+                .ge(Image::getCreatedAt, todayStart));
+        List<Video> todayVideos = videoMapper.selectList(new LambdaQueryWrapper<Video>()
+                .eq(Video::getStatus, 1)
+                .ge(Video::getCreatedAt, todayStart));
+        storageIncreaseToday = todayImages.stream().mapToLong(img -> img.getFileSize() != null ? img.getFileSize() : 0L).sum()
+                + todayVideos.stream().mapToLong(vid -> vid.getFileSize() != null ? vid.getFileSize() : 0L).sum();
+        data.put("storageIncreaseToday", storageIncreaseToday);
+        data.put("storageIncreaseTodayFormatted", formatFileSize(storageIncreaseToday));
+
+        // 实时时间戳
+        data.put("timestamp", now.toString());
+
+        // 今日每小时活动趋势
+        List<Map<String, Object>> hourlyTrend = new ArrayList<>();
+        for (int hour = 0; hour < 24; hour++) {
+            LocalDateTime hourStart = todayStart.plusHours(hour);
+            LocalDateTime hourEnd = hourStart.plusHours(1);
+            if (hourEnd.isAfter(now)) break;
+
+            long hourUploads = imageMapper.selectCount(new LambdaQueryWrapper<Image>()
+                    .ge(Image::getCreatedAt, hourStart)
+                    .lt(Image::getCreatedAt, hourEnd))
+                    + videoMapper.selectCount(new LambdaQueryWrapper<Video>()
+                    .ge(Video::getCreatedAt, hourStart)
+                    .lt(Video::getCreatedAt, hourEnd));
+
+            long hourDetections = imageResultMapper.selectCount(new LambdaQueryWrapper<ImageResult>()
+                    .ge(ImageResult::getCreatedAt, hourStart)
+                    .lt(ImageResult::getCreatedAt, hourEnd));
+
+            Map<String, Object> hourData = new HashMap<>();
+            hourData.put("hour", hour);
+            hourData.put("uploads", hourUploads);
+            hourData.put("detections", hourDetections);
+            hourlyTrend.add(hourData);
+        }
+        data.put("hourlyTrend", hourlyTrend);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    /**
+     * 6. 异常热点时段分析
+     */
+    @Override
+    public Map<String, Object> getAnomalyTimeAnalysis(String token) {
+        User user = getUserByToken(token);
+        if (user == null) {
+            return error("Token无效或已过期");
+        }
+
+        boolean isAdmin = "admin".equals(user.getRoleId());
+        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
+
+        // 获取图片和检测结果
+        LambdaQueryWrapper<Image> imgWrapper = new LambdaQueryWrapper<Image>().eq(Image::getStatus, 1);
+        if (!isAdmin) {
+            imgWrapper.eq(Image::getUserId, user.getId());
+        }
+        List<Image> images = imageMapper.selectList(imgWrapper);
+        List<Long> imageIds = images.stream().map(Image::getId).collect(Collectors.toList());
+
+        // 按上传时段统计
+        int[] hourlyUploads = new int[24];
+        int[] hourlyAnomalies = new int[24];
+
+        // 按上传时间分组图片
+        Map<Integer, List<Image>> imagesByHour = new HashMap<>();
+        for (Image img : images) {
+            if (img.getCreatedAt() != null) {
+                int hour = img.getCreatedAt().getHour();
+                imagesByHour.computeIfAbsent(hour, k -> new ArrayList<>()).add(img);
+                hourlyUploads[hour]++;
+            }
+        }
+
+        // 统计每个时段的异常
+        if (!imageIds.isEmpty()) {
+            List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
+                    .in(ImageResult::getImageId, imageIds)
+                    .ne(ImageResult::getLabel, "NORMAL"));
+
+            // 按 imageId 分组
+            Map<Long, Image> imageMap = images.stream().collect(Collectors.toMap(Image::getId, i -> i));
+
+            for (ImageResult ir : results) {
+                Image img = imageMap.get(ir.getImageId());
+                if (img != null && img.getCreatedAt() != null) {
+                    int hour = img.getCreatedAt().getHour();
+                    hourlyAnomalies[hour]++;
+                }
+            }
+        }
+
+        // 构建时段分布数据
+        List<Map<String, Object>> hourlyDistribution = new ArrayList<>();
+        for (int hour = 0; hour < 24; hour++) {
+            Map<String, Object> hourData = new HashMap<>();
+            hourData.put("hour", hour);
+            hourData.put("hourLabel", String.format("%02d:00-%02d:00", hour, (hour + 1) % 24));
+            hourData.put("uploads", hourlyUploads[hour]);
+            hourData.put("anomalies", hourlyAnomalies[hour]);
+            hourData.put("anomalyRate", hourlyUploads[hour] > 0 ? (double) hourlyAnomalies[hour] / hourlyUploads[hour] : 0.0);
+            hourlyDistribution.add(hourData);
+        }
+        data.put("hourlyDistribution", hourlyDistribution);
+
+        // 找出异常率最高的时段
+        int peakHour = 0;
+        double peakAnomalyRate = 0;
+        for (int hour = 0; hour < 24; hour++) {
+            double rate = hourlyUploads[hour] > 0 ? (double) hourlyAnomalies[hour] / hourlyUploads[hour] : 0;
+            if (rate > peakAnomalyRate) {
+                peakAnomalyRate = rate;
+                peakHour = hour;
+            }
+        }
+        data.put("peakAnomalyHour", peakHour);
+        data.put("peakAnomalyHourLabel", String.format("%02d:00-%02d:00", peakHour, (peakHour + 1) % 24));
+        data.put("peakAnomalyRate", peakAnomalyRate);
+
+        // 按星期统计
+        int[] weekdayUploads = new int[7];
+        int[] weekdayAnomalies = new int[7];
+
+        Map<Integer, List<Image>> imagesByWeekday = new HashMap<>();
+        for (Image img : images) {
+            if (img.getCreatedAt() != null) {
+                int weekday = img.getCreatedAt().getDayOfWeek().getValue() % 7; // 0=周日, 1-6=周一到周六
+                imagesByWeekday.computeIfAbsent(weekday, k -> new ArrayList<>()).add(img);
+                weekdayUploads[weekday]++;
+            }
+        }
+
+        if (!imageIds.isEmpty()) {
+            List<ImageResult> results = imageResultMapper.selectList(new LambdaQueryWrapper<ImageResult>()
+                    .in(ImageResult::getImageId, imageIds)
+                    .ne(ImageResult::getLabel, "NORMAL"));
+
+            Map<Long, Image> imageMap = images.stream().collect(Collectors.toMap(Image::getId, i -> i));
+
+            for (ImageResult ir : results) {
+                Image img = imageMap.get(ir.getImageId());
+                if (img != null && img.getCreatedAt() != null) {
+                    int weekday = img.getCreatedAt().getDayOfWeek().getValue() % 7;
+                    weekdayAnomalies[weekday]++;
+                }
+            }
+        }
+
+        String[] weekdayNames = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+        List<Map<String, Object>> weekdayDistribution = new ArrayList<>();
+        for (int day = 0; day < 7; day++) {
+            Map<String, Object> dayData = new HashMap<>();
+            dayData.put("weekday", day);
+            dayData.put("weekdayName", weekdayNames[day]);
+            dayData.put("uploads", weekdayUploads[day]);
+            dayData.put("anomalies", weekdayAnomalies[day]);
+            dayData.put("anomalyRate", weekdayUploads[day] > 0 ? (double) weekdayAnomalies[day] / weekdayUploads[day] : 0.0);
+            weekdayDistribution.add(dayData);
+        }
+        data.put("weekdayDistribution", weekdayDistribution);
+
+        result.put("ok", true);
+        result.put("data", data);
+        return result;
+    }
+
+    // ========== 工具方法 ==========
+
+    /**
+     * 格式化文件大小
+     */
+    private String formatFileSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.2f KB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.2f MB", bytes / (1024.0 * 1024));
+        return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
+    }
+
+    /**
+     * 格式化时长（秒 -> mm:ss 或 hh:mm:ss）
+     */
+    private String formatDuration(double seconds) {
+        int totalSeconds = (int) seconds;
+        int hours = totalSeconds / 3600;
+        int minutes = (totalSeconds % 3600) / 60;
+        int secs = totalSeconds % 60;
+
+        if (hours > 0) {
+            return String.format("%d:%02d:%02d", hours, minutes, secs);
+        }
+        return String.format("%d:%02d", minutes, secs);
+    }
+
+    /**
+     * 标准化文件类型（处理 MIME type 和扩展名）
+     */
+    private String normalizeFileType(String fileType) {
+        if (fileType == null || fileType.isEmpty()) return "unknown";
+        
+        // 转小写
+        String type = fileType.toLowerCase();
+        
+        // 如果是 MIME type，提取扩展名部分
+        if (type.contains("/")) {
+            type = type.substring(type.lastIndexOf("/") + 1);
+        }
+        
+        // 常见格式映射
+        switch (type) {
+            case "jpeg":
+            case "jpg":
+                return "jpg";
+            case "png":
+                return "png";
+            case "webp":
+                return "webp";
+            case "gif":
+                return "gif";
+            case "bmp":
+                return "bmp";
+            case "mp4":
+            case "mpeg4":
+                return "mp4";
+            case "mov":
+            case "quicktime":
+                return "mov";
+            case "avi":
+                return "avi";
+            case "mkv":
+                return "mkv";
+            case "webm":
+                return "webm";
+            default:
+                return type;
+        }
+    }
 }
